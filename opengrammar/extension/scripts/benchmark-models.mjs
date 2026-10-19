@@ -321,7 +321,7 @@ async function runTarget(target) {
 const DEFAULT_LOCAL = ['qwen3:4b-instruct', 'llama3.2:3b', 'qwen2.5:3b', 'gemma2:2b', 'qwen2.5:7b', 'qwen2.5:1.5b'];
 // LOCAL_ARG undefined (no --local flag) → default set; '' (--local=) → no local models.
 const localModels = LOCAL_ARG !== undefined ? LOCAL_ARG.split(',').map((s) => s.trim()).filter(Boolean) : DEFAULT_LOCAL;
-const targets = localModels.map((m) => ({ kind: 'ollama', name: m, model: m, thinking: /\bqwen3\b/i.test(m) && !/instruct/i.test(m) }));
+const targets = localModels.map((m) => ({ kind: 'ollama', name: m, model: m, thinking: /\bqwen3\b|gemma3n|gemma4/i.test(m) && !/instruct/i.test(m) }));
 
 if (INCLUDE_REMOTE) {
   if (ABACUS_KEY) targets.push({ kind: 'remote', name: 'abacus/route-llm', baseUrl: 'https://routellm.abacus.ai/v1', key: ABACUS_KEY, model: 'route-llm' });

@@ -195,7 +195,7 @@ async function llmFix(spec, sentence) {
   const messages = [{ role: 'system', content: SYS }, { role: 'user', content: sentence }];
   try {
     if (provider === 'ollama') {
-      const thinking = /\bqwen3\b/i.test(model) && !/instruct/i.test(model);
+      const thinking = /\bqwen3\b|gemma3n|gemma4/i.test(model) && !/instruct/i.test(model);
       const body = { model, messages, stream: false, options: { temperature: 0, num_ctx: 4096, num_predict: 200 } };
       if (thinking) body.think = false;
       const res = await realFetch('http://localhost:11434/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });

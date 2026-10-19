@@ -136,33 +136,62 @@ function applyToRichEditor(el: HTMLElement, fix: Fix, kind: EditorKind): boolean
       .trim();
   const cleanlyReplaced = () => norm(buildTextMap(el).text) === norm(expected);
 
-  // One insert attempt. Re-resolves the span each call so a retry works against the
-  // editor's current DOM. Returns whether the field now equals the clean replacement.
-  const attempt = (): boolean => {
+  // Put the native selection exactly over the word. Re-resolves the span each call
+  // (so a retry works against the editor's CURRENT DOM) and returns the selected text,
+  // which the caller checks against `original` to confirm the WORD — not a collapsed
+  // caret — is selected. Returns null if the span can no longer be mapped.
+  const selectWord = (): string | null => {
     const liveMap = buildTextMap(el);
     const liveSpan = resolveSpan(liveMap, fix.offset, fix.length, fix.original);
-    if (!liveSpan) return cleanlyReplaced(); // may already have landed on a prior tick
+    if (!liveSpan) return null;
     const range = offsetToRange(liveMap, liveSpan.start, liveSpan.end);
-    if (!range) return false;
-
+    if (!range) return null;
     el.focus();
     const sel = window.getSelection();
-    if (!sel) return false;
+    if (!sel) return null;
     sel.removeAllRanges();
     sel.addRange(range);
+    return sel.toString();
+  };
 
-    let ok = false;
+  // Replace the CURRENTLY SELECTED word with the fix. REFUSES to run on a collapsed or
+  // missing selection — inserting at a bare caret is what leaves the original word in
+  // place and appends a duplicate ("teh" → "teh the"). The TWO steps matter: a single
+  // `insertText` over a range is NOT honored by editors that keep their own selection
+  // model — Lexical (Facebook Messenger) inserts at its internal caret and never deletes
+  // the word, giving "tehthe". But `execCommand('delete')` on a range IS honored: it
+  // removes the selection and collapses to a caret, after which `insertText` lands
+  // cleanly. Verified same-frame against a real Lexical editor. Returns whether the
+  // field now equals the clean replacement.
+  const replaceSelection = (): boolean => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    // Capture the range for the DOM fallback BEFORE execCommand mutates the selection.
+    let fallbackRange: Range | null = null;
     try {
-      ok = document.execCommand('insertText', false, fix.replacement);
+      fallbackRange = sel.getRangeAt(0).cloneRange();
     } catch {
-      ok = false;
+      fallbackRange = null;
     }
-    if (!ok) {
-      // Minimal DOM fallback with caret placed AFTER the inserted text.
+    let handled = false;
+    try {
+      const delOk = document.execCommand('delete');
+      const insOk = document.execCommand('insertText', false, fix.replacement);
+      handled = delOk || insOk;
+    } catch {
+      handled = false;
+    }
+    if (!handled && fallbackRange) {
+      // execCommand unsupported (e.g. jsdom / a locked-down editor): splice the DOM
+      // directly — delete the selected word, insert, caret placed AFTER. Only here do we
+      // dispatch a synthetic `input`, because the manual splice fired no events. A
+      // SUCCESSFUL execCommand already dispatched a real, trusted beforeinput/input that
+      // the framework processed; firing another synthetic `input` would make editors
+      // that listen to it (Lexical) insert the replacement a SECOND time → "thethe".
       try {
-        range.deleteContents();
+        fallbackRange.deleteContents();
         const tn = document.createTextNode(fix.replacement);
-        range.insertNode(tn);
+        fallbackRange.insertNode(tn);
         const after = document.createRange();
         after.setStartAfter(tn);
         after.collapse(true);
@@ -171,15 +200,22 @@ function applyToRichEditor(el: HTMLElement, fix: Fix, kind: EditorKind): boolean
       } catch {
         return false;
       }
+      fireInput(el, fix.replacement);
     }
-    fireInput(el, fix.replacement);
     return cleanlyReplaced();
   };
 
-  // Reconcile on the next tick (frameworks apply async). Three outcomes:
+  // One select + replace attempt against the editor's current DOM.
+  const attempt = (): boolean => {
+    if (selectWord() === null) return cleanlyReplaced(); // may have landed on a prior tick
+    return replaceSelection();
+  };
+
+  // Reconcile on a later tick, for editors that apply/revert ASYNCHRONOUSLY (Gmail and
+  // Draft can revert a same-frame edit on their next tick). Three outcomes:
   //  - CLEAN replace → done.
-  //  - field UNCHANGED → the framework reverted us (a no-op) → retry ONCE.
-  //  - field changed but NOT into the clean replacement → the insert landed WRONG
+  //  - field UNCHANGED → the edit was a no-op (framework reverted us) → retry ONCE.
+  //  - field changed but NOT into the clean replacement → the edit landed WRONG
   //    (duplicated the word: "damn" → "DamnDamn") → UNDO it so we never leave corrupted
   //    text. We NEVER blindly re-insert after a change — that is exactly what compounds
   //    into a duplicate. The field's own re-analysis re-flags the issue for a clean retry.
@@ -196,20 +232,23 @@ function applyToRichEditor(el: HTMLElement, fix: Fix, kind: EditorKind): boolean
     }
   };
 
+  // Primary apply is synchronous and verifiable for EVERY editor: select the word, then
+  // delete-and-insert over that selection.
+  const clean = attempt();
+
   if (kind !== 'contenteditable') {
-    // Framework editors (Draft, Gmail, Lexical, ProseMirror, Slate, Quill, CKEditor,
-    // CodeMirror) reconcile on a tick, so a same-frame insert can race the reconciler.
-    // Do a best-effort sync insert, reconcile on the next tick, and report optimistic
-    // success — the caller's re-analysis re-flags if it didn't hold.
-    attempt();
+    // Framework editors (Lexical, Draft, Gmail, ProseMirror, Slate, Quill, CKEditor,
+    // CodeMirror) may reconcile on a later tick, so re-verify then — undoing a stray
+    // revert or duplicate. Report optimistic success; the caller's re-analysis re-flags
+    // if it didn't hold.
     setTimeout(reconcile, 0);
     return true;
   }
 
-  if (attempt()) return true;
-  // Plain contenteditable: the sync insert didn't verify. Reconcile once on the next
-  // tick (no-op → retry, bad insert → undo) and report the accurate sync result so a
-  // stale span keeps its underline.
+  if (clean) return true;
+  // Plain contenteditable: the sync replace didn't verify. Reconcile once on the next
+  // tick (no-op → retry, bad edit → undo) and report the accurate sync result so a stale
+  // span keeps its underline.
   setTimeout(reconcile, 0);
   return false;
 }
