@@ -99,6 +99,20 @@ function locate(
   preferEnd: boolean,
 ): { node: Text; offset: number } | null {
   const segs = map.segments;
+  const endBefore = (i: number) => {
+    for (let j = i - 1; j >= 0; j--) {
+      const s = segs[j]!;
+      if (s.node) return { node: s.node, offset: s.node.data.length };
+    }
+    return null;
+  };
+  const startAfter = (i: number) => {
+    for (let j = i + 1; j < segs.length; j++) {
+      const s = segs[j]!;
+      if (s.node) return { node: s.node, offset: 0 };
+    }
+    return null;
+  };
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i]!;
     const within = preferEnd
@@ -106,18 +120,10 @@ function locate(
       : index >= seg.textStart && index < seg.textEnd;
     if (within) {
       if (seg.node) return { node: seg.node, offset: index - seg.textStart };
-      // Synthetic separator: snap to the nearest real node boundary.
-      if (preferEnd) {
-        for (let j = i - 1; j >= 0; j--) {
-          const s = segs[j]!;
-          if (s.node) return { node: s.node, offset: s.node.data.length };
-        }
-      } else {
-        for (let j = i + 1; j < segs.length; j++) {
-          const s = segs[j]!;
-          if (s.node) return { node: s.node, offset: 0 };
-        }
-      }
+      // Synthetic separator: snap to the nearest real node boundary on the preferred
+      // side — or the other side when there's nothing there (e.g. the end of the last
+      // paragraph, which sits on the trailing block separator).
+      return preferEnd ? (endBefore(i) ?? startAfter(i)) : (startAfter(i) ?? endBefore(i));
     }
   }
   // index === total length → end of last real node
@@ -146,6 +152,33 @@ export function offsetToRange(map: TextMap, start: number, end: number): Range |
   } catch {
     return null;
   }
+}
+
+/**
+ * The inverse of `offsetToRange`: the text offset of a DOM boundary point (e.g. the
+ * caret, `selection.focusNode/focusOffset`), in the SAME coordinates as `map.text`.
+ * `Range.toString()` can't be used for this — it omits the "\n" this map adds for
+ * <br> and block boundaries, so every line break before the caret would shift it.
+ */
+export function pointToOffset(map: TextMap, container: Node, offset: number): number {
+  if (container.nodeType === Node.TEXT_NODE) {
+    const seg = map.segments.find((s) => s.node === container);
+    if (seg) return seg.textStart + Math.min(offset, seg.textEnd - seg.textStart);
+  }
+  // Element boundary: the point sits after every mapped text node that starts before it.
+  const point = document.createRange();
+  try {
+    point.setStart(container, offset);
+  } catch {
+    return map.text.length;
+  }
+  let pos = 0;
+  for (const seg of map.segments) {
+    if (!seg.node) continue;
+    if (point.comparePoint(seg.node, 0) >= 0) break;
+    pos = seg.textEnd;
+  }
+  return pos;
 }
 
 /**
@@ -210,7 +243,7 @@ export function resolveInString(
   length: number,
   original: string,
 ): { start: number; end: number } | null {
-  if (text.substr(offset, length) === original) {
+  if (text.slice(offset, offset + length) === original) {
     return { start: offset, end: offset + length };
   }
   if (!original) return null;

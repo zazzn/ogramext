@@ -1,4 +1,4 @@
-import { buildTextMap } from './textMap';
+import { buildTextMap, pointToOffset } from './textMap';
 
 /**
  * Blank out forum quote blocks (`[QUOTE=...]...[/QUOTE]`, depth-aware) so we
@@ -126,53 +126,12 @@ export function getCaretPosition(element: HTMLElement): number {
   }
 
   if (element.isContentEditable) {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return 0;
-
-    const range = selection.getRangeAt(0);
-    const preCaretRange = range.cloneRange();
-    preCaretRange.selectNodeContents(element);
-    preCaretRange.setEnd(range.endContainer, range.endOffset);
-
-    return preCaretRange.toString().length;
+    // Measure through the shared text map so the caret is in the SAME coordinates as
+    // extractText() (Range.toString() drops the "\n" the map adds per line break).
+    const sel = window.getSelection();
+    if (!sel?.focusNode || !element.contains(sel.focusNode)) return 0;
+    return pointToOffset(buildTextMap(element), sel.focusNode, sel.focusOffset);
   }
 
   return 0;
-}
-
-/**
- * Sets the caret position within an editable element
- */
-export function setCaretPosition(element: HTMLElement, position: number) {
-  if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') {
-    (element as HTMLInputElement | HTMLTextAreaElement).setSelectionRange(position, position);
-    return;
-  }
-
-  if (element.isContentEditable) {
-    const range = document.createRange();
-    const selection = window.getSelection();
-
-    if (!selection) return;
-
-    // Find the node and offset for the position
-    let currentPos = 0;
-    const treeWalker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-
-    let node: Node | null = treeWalker.nextNode();
-    while (node) {
-      const nodeLength = node.textContent?.length || 0;
-
-      if (currentPos + nodeLength >= position) {
-        range.setStart(node, position - currentPos);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
-      }
-
-      currentPos += nodeLength;
-      node = treeWalker.nextNode();
-    }
-  }
 }

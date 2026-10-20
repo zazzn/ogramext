@@ -964,7 +964,7 @@ async function runProactiveLlmReview(element: HTMLElement) {
       // Auto-apply the high-conviction (quick-fix) LLM fixes into the settled text
       // (also learned). Applying mutates the field, whose input event retriggers a
       // fresh local+LLM cycle that repaints cleanly — so on success we clear and bail.
-      const { applied } = applySettledQuickFixes(element, text, llmIssues);
+      const { applied } = await applySettledQuickFixes(element, text, llmIssues);
       for (const a of applied) recordLearnedCorrection(a.original, a.suggestion);
       if (applied.length > 0) {
         clearHighlights();

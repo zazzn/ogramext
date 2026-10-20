@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Apply harness</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 16px; max-width: 960px; }
+  #stage > * { display: block; width: 420px; border: 1px solid #ccc; padding: 6px; margin: 4px 0; min-height: 1.4em; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  td, th { border-bottom: 1px solid #eee; padding: 4px 6px; text-align: left; vertical-align: top; }
+  .pass { color: #127a48; font-weight: 600; }
+  .fail { color: #b91c1c; font-weight: 600; }
+</style>
+</head>
+<body>
+<h3>editorAdapter apply harness</h3>
+<p>Runs the shipped <code>applyFix</code> against real fields, including real Lexical (the
+Facebook/Messenger editor), 3× per case to catch timing races. jsdom can't run any of this.</p>
+<p id="summary">running…</p>
+<div id="stage"></div>
+<table><thead><tr><th>case</th><th>field</th><th>result</th><th>detail</th></tr></thead><tbody id="rows"></tbody></table>
+<script type="module">
+import { createEditor, $getRoot, $createParagraphNode, $createTextNode } from 'https://esm.sh/lexical@0.16.1';
+import { registerPlainText } from 'https://esm.sh/@lexical/plain-text@0.16.1';
+import { registerRichText } from 'https://esm.sh/@lexical/rich-text@0.16.1';
+import { applyFix, getCaretPosition, buildTextMap } from './bundle.js';
+
+const stage = document.getElementById('stage');
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const flat = (s) => s.replace(/[​-‍﻿]/g, '').replace(/ /g, ' ').trim();
+const isForm = (el) => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA';
+const textOf = (el) => (isForm(el) ? el.value : buildTextMap(el).text);
+const esc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+function lastTextNode(el) {
+  const w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  let n = null;
+  while (w.nextNode()) n = w.currentNode;
+  return n;
+}
+
+// ── field kinds: each builds a fresh field; set() loads text ("\n" = new line) ──
+function formKind(tag, type) {
+  return () => {
+    const el = document.createElement(tag);
+    if (type) el.type = type;
+    stage.append(el);
+    return { el, async set(t) { el.value = tag === 'input' ? t.replace(/\n/g, ' ') : t; } };
+  };
+}
+function contentEditable(onInput) {
+  const el = document.createElement('div');
+  el.contentEditable = 'true';
+  stage.append(el);
+  let snapshot = '';
+  let inputs = 0;
+  if (onInput) el.addEventListener('input', (e) => onInput(e, el, snapshot, ++inputs));
+  return {
+    el,
+    async set(t) {
+      const lines = t.split('\n');
+      el.innerHTML = lines.length === 1 ? esc(t) : lines.map((l) => `<div>${esc(l)}</div>`).join('');
+      snapshot = el.innerHTML;
+      inputs = 0;
+    },
+  };
+}
+function lexical(register) {
+  return () => {
+    const el = document.createElement('div');
+    el.contentEditable = 'true';
+    stage.append(el);
+    const editor = createEditor({ namespace: 'h', onError: (e) => console.error(e) });
+    editor.setRootElement(el);
+    register(editor);
+    return {
+      el,
+      async set(t) {
+        editor.update(() => {
+          const root = $getRoot();
+          root.clear();
+          for (const line of t.split('\n')) {
+            const p = $createParagraphNode();
+            if (line) p.append($createTextNode(line));
+            root.append(p);
+          }
+        });
+        await wait(30);
+      },
+    };
+  };
+}
+
+const KINDS = {
+  input: formKind('input'),
+  'input[email]': formKind('input', 'email'), // no selection API
+  textarea: formKind('textarea'),
+  contenteditable: () => contentEditable(),
+  'lexical plain': lexical(registerPlainText),
+  'lexical rich': lexical(registerRichText),
+  // An editor that reverts the first outside edit on its next tick (Gmail/Draft style).
+  'reverts once': () =>
+    contentEditable((e, el, snap, n) => { if (n === 1) setTimeout(() => { el.innerHTML = snap; }, 0); }),
+  // An editor that rejects every outside edit (controlled field).
+  'rejects all': () => contentEditable((e, el, snap) => { el.innerHTML = snap; }),
+  // An editor that garbles the first insert (lands wrong) — must be put back.
+  'garbles once': () =>
+    contentEditable((e, el, snap, n) => {
+      if (e.inputType === 'insertText' && !el.dataset.garbled) {
+        el.dataset.garbled = '1';
+        getSelection().getRangeAt(0).insertNode(document.createTextNode('X'));
+      }
+    }),
+};
+const EVERYDAY = ['input', 'input[email]', 'textarea', 'contenteditable', 'lexical plain', 'lexical rich'];
+const HAS_CARET = EVERYDAY.filter((k) => k !== 'input[email]'); // email inputs have no caret API
+const MULTILINE = ['textarea', 'contenteditable', 'lexical plain', 'lexical rich'];
+
+// ── cases ──
+const CASES = [
+  { name: 'replace word at start', kinds: EVERYDAY, text: 'teh cat', fix: ['teh', 'the'], want: 'the cat' },
+  { name: 'replace word mid-sentence', kinds: EVERYDAY, text: 'I beleive you', fix: ['beleive', 'believe'], want: 'I believe you' },
+  { name: 'replace word at end', kinds: EVERYDAY, text: 'a nice huose', fix: ['huose', 'house'], want: 'a nice house' },
+  { name: 'fix on line 2', kinds: MULTILINE, text: 'first line\nI beleive you', fix: ['beleive', 'believe'], want: 'first line\nI believe you' },
+  { name: 'rewrite whole multi-line message', kinds: MULTILINE, text: 'hey can u send it\nthx', fix: ['hey can u send it\nthx', 'Hi, could you send it?\nThank you.'], want: 'Hi, could you send it?\nThank you.' },
+  { name: 'selection rewrite keeps trailing space', kinds: EVERYDAY, text: 'I gonna go', fix: ['gonna ', 'am going to '], want: 'I am going to go' },
+  { name: 'length-changing fix', kinds: EVERYDAY, text: 'I want alot more', fix: ['alot', 'a lot'], want: 'I want a lot more' },
+  { name: 'insertion (empty original)', kinds: EVERYDAY, text: 'Hello world', fix: ['', ','], at: 5, want: 'Hello, world' },
+  { name: 'insertion at end of last line', kinds: EVERYDAY, text: 'Hello world', fix: ['', '.'], at: 11, want: 'Hello world.' },
+  { name: 'deletion (empty replacement)', kinds: EVERYDAY, text: 'the the cat', fix: ['the ', ''], want: 'the cat' },
+  { name: 'double-space fix', kinds: ['textarea', 'contenteditable'], text: 'a  b', fix: ['  ', ' '], want: 'a b' },
+  { name: 'stale span is refused', kinds: EVERYDAY, text: 'teh cat', fix: ['zzz', 'the'], want: 'teh cat', ok: false },
+  { name: 'keepCaret: caret stays at end', kinds: HAS_CARET, text: 'I want alot more', fix: ['alot', 'a lot'], want: 'I want a lot more', keepCaret: true },
+  { name: 'keepCaret: multi-line, caret on line 2', kinds: MULTILINE, text: 'I want alot more\nsecond line', fix: ['alot', 'a lot'], want: 'I want a lot more\nsecond line', keepCaret: true },
+  { name: 'caret offset on line 2 (multi-line)', kinds: ['contenteditable', 'lexical rich'], text: 'line one\nline two', caretOnly: true },
+  { name: 'editor reverts first try → retried', kinds: ['reverts once'], text: 'teh cat', fix: ['teh', 'the'], want: 'the cat' },
+  { name: 'editor rejects edits → false, untouched', kinds: ['rejects all'], text: 'teh cat', fix: ['teh', 'the'], want: 'teh cat', ok: false },
+  { name: 'edit lands wrong → text put back', kinds: ['garbles once'], text: 'I beleive you', fix: ['beleive', 'believe'], want: 'I beleive you', ok: false },
+];
+
+async function caretToEnd(el) {
+  el.focus();
+  if (isForm(el)) { el.setSelectionRange(el.value.length, el.value.length); return; }
+  const n = lastTextNode(el);
+  const r = document.createRange();
+  if (n) r.setStart(n, n.data.length); else r.selectNodeContents(el);
+  r.collapse(true);
+  getSelection().removeAllRanges();
+  getSelection().addRange(r);
+  await wait(10); // let Lexical adopt the selection
+}
+const caretOf = (el) => (isForm(el) ? el.selectionEnd : getCaretPosition(el));
+const endOffset = (el) => textOf(el).replace(/\n+$/, '').length;
+
+async function runOnce(c, make) {
+  stage.innerHTML = '';
+  const f = make();
+  await f.set(c.text);
+  const { el } = f;
+  if (c.caretOnly) {
+    await caretToEnd(el);
+    const caret = caretOf(el);
+    const text = textOf(el);
+    return caret === endOffset(el) && text.slice(caret).trim() === ''
+      ? null
+      : `caret=${caret}, expected ${endOffset(el)} in ${JSON.stringify(text)}`;
+  }
+  if (c.keepCaret) await caretToEnd(el);
+  else el.focus();
+  const [original, replacement] = c.fix;
+  const text = textOf(el);
+  const offset = c.at ?? Math.max(0, text.indexOf(original));
+  const ok = await applyFix(el, { original, offset, length: original.length, replacement }, { keepCaret: !!c.keepCaret });
+  await wait(20);
+  const got = textOf(el);
+  const wantOk = c.ok ?? true;
+  if (ok !== wantOk) return `returned ${ok}, expected ${wantOk}; text ${JSON.stringify(flat(got))}`;
+  if (flat(got) !== flat(c.want)) return `text ${JSON.stringify(flat(got))}, expected ${JSON.stringify(c.want)}`;
+  if (c.keepCaret && caretOf(el) !== endOffset(el)) return `caret=${caretOf(el)}, expected ${endOffset(el)}`;
+  return null;
+}
+
+const rows = document.getElementById('rows');
+const results = [];
+for (const c of CASES) {
+  for (const kind of c.kinds) {
+    let fail = null;
+    for (let i = 0; i < 3 && !fail; i++) fail = await runOnce(c, KINDS[kind]);
+    results.push({ case: c.name, kind, pass: !fail, detail: fail || '' });
+    rows.insertAdjacentHTML(
+      'beforeend',
+      `<tr><td>${esc(c.name)}</td><td>${esc(kind)}</td><td class="${fail ? 'fail' : 'pass'}">${fail ? 'FAIL' : 'pass'}</td><td>${esc(fail || '')}</td></tr>`,
+    );
+  }
+}
+stage.innerHTML = '';
+const failed = results.filter((r) => !r.pass).length;
+document.getElementById('summary').innerHTML =
+  `<span class="${failed ? 'fail' : 'pass'}">${results.length - failed}/${results.length} passed</span>`;
+window.__RESULTS__ = results;
+</script>
+</body>
+</html>

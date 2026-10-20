@@ -20,6 +20,8 @@ import {
 } from '../shared/protectedText';
 import { applyIssuePolicy } from './issuePolicy';
 import { DEFAULT_WRITING_MODEL } from '../shared/ollamaModels';
+// The AI instructions, shared verbatim with the desktop + mobile apps (see _about).
+import prompts from '../shared/prompts.json';
 import { PROVIDERS } from '../types';
 import {
   chatCompletion,
@@ -589,33 +591,24 @@ async function handleRewrite(text: string, tone: string, sendResponse: (response
         'llmProtectedMasking',
       ]);
 
-    // Tone instructions ported verbatim from backend/src/index.ts (/rewrite).
-    const toneInstructions: Record<string, string> = {
-      polish:
-        'Lightly polish the wording for clarity and flow. Do NOT change the meaning, facts, or overall tone, and keep the length similar',
-      formal: 'Make the text more formal and professional',
-      casual: 'Make the text more casual and conversational',
-      professional: 'Make the text more professional and business-appropriate',
-      friendly: 'Make the text friendlier and warmer',
-      concise: 'Make the text more concise and direct',
-      detailed: 'Make the text more detailed and elaborate',
-      persuasive: 'Make the text more persuasive and compelling',
-      neutral: 'Keep the text neutral and objective',
-    };
+    const toneSpec = prompts.rewrite.tones.find((t) => t.id === tone);
+    if (!toneSpec) {
+      sendResponse({ error: `Unknown tone: ${tone}` });
+      return;
+    }
 
     const rewritten = await chatCompletion({
       apiKey,
       baseURL: resolveBaseUrl(provider, customBaseUrl, ollamaUrl),
       model: model || 'gpt-4o-mini',
       messages: [
-        {
-          role: 'system',
-          content: `You are a writing assistant. ${toneInstructions[tone] || 'Improve the writing'}. Preserve URLs, email addresses, file paths, code, @mentions, #hashtags, IDs, and version strings exactly as written. Return ONLY the rewritten text, no explanations.`,
-        },
+        { role: 'system', content: prompts.rewrite.system.replace('{instruction}', toneSpec.instruction) },
         { role: 'user', content: text },
       ],
-      temperature: 0.7,
-      maxTokens: 1000,
+      // Same settings as the desktop/mobile `llm_rewrite`: deterministic, and a token
+      // budget that scales with the text so long messages aren't cut off.
+      temperature: 0,
+      maxTokens: Math.min(4000, Math.max(256, [...text].length * 2 + 200)),
       extraBody: ollamaKeepAliveParam(provider, ollamaKeepAlive),
       nativeOllama: provider === 'ollama',
     });
@@ -806,27 +799,7 @@ async function correctText(
       baseURL: resolveBaseUrl(provider, customBaseUrl, ollamaUrl),
       model: model || 'gpt-4o-mini',
       messages: [
-        {
-          role: 'system',
-          content:
-            'You are a precise proofreading engine. Fix only real, objective ' +
-            'mistakes: spelling, grammar, punctuation, capitalization, and ' +
-            'word-form errors. Do NOT rewrite for style, tone, or clarity, and do ' +
-            'NOT change casual wording or slang. Leave every item in ' +
-            'protectedFragments EXACTLY as written — technical terms, part ' +
-            'numbers, model names, URLs, file paths, code, IDs, version strings, ' +
-            '@handles, and placeholders like [[OG_PROTECTED_1]] must never change. ' +
-            'Return JSON ONLY with this shape: {"correctedText":string,' +
-            '"shouldShow":boolean,"protectedSpansPreserved":boolean,' +
-            '"corrections":[{"original":string,"replacement":string,' +
-            '"start":number,"end":number,' +
-            '"type":"spelling|grammar|punctuation|capitalization|word-form",' +
-            '"confidence":"high|medium|low"}]}. The "corrections" array lists each ' +
-            'individual fix — give the EXACT original substring, its replacement, ' +
-            'and the character start/end offsets of that substring in the input ' +
-            'text; return an empty array if there are no real mistakes. ' +
-            'Set correctedText to the fully corrected text.',
-        },
+        { role: 'system', content: prompts.proofread.system },
         {
           role: 'user',
           content: JSON.stringify({

@@ -1,51 +1,27 @@
 /**
- * ONE apply primitive for every field type.
+ * ONE apply primitive for every editable field: <input>, <textarea>, and any
+ * contenteditable — plain, Gmail, Lexical (Facebook/Messenger), Draft, ProseMirror,
+ * Slate, Quill, CKEditor… There is no per-editor detection; every field gets the same
+ * four steps:
  *
- * Replaces the three divergent, fragile apply paths (raw `el.value =`,
- * `range.insertNode`+`normalize`, per-call splices) that caused: fixes not
- * landing on React-controlled inputs, corruption/revert on framework rich
- * editors, and caret jumps.
- *
- * Strategy (per the research): validate the span, focus, set the native
- * selection to it, then drive the browser's real editing pipeline via
- * `execCommand('insertText')`. That fires genuine beforeinput/input, so
- * React/Vue value tracking and ProseMirror/Lexical/Slate/Quill/TipTap/
- * CodeMirror transaction systems all observe it, undo is preserved, and
- * the caret ends up correctly placed. Fallbacks cover the rare cases.
+ *  1. FIND   — re-locate the issue's text in the field's CURRENT text (it may have
+ *              moved since analysis). If it's gone, give up rather than guess.
+ *  2. EDIT   — select exactly that span and drive the browser's own editing commands,
+ *              execCommand('delete') then execCommand('insertText'). They fire real,
+ *              trusted beforeinput/input events, so React/Vue value tracking and every
+ *              rich-editor framework (each keeps its own document model) see a normal
+ *              edit; the caret lands after the fix; Ctrl+Z undoes it in one step. A
+ *              single insertText over the selection is NOT enough — Lexical ignores the
+ *              range and inserts at its own caret, leaving the old word ("tehthe").
+ *              Structural edits (a delete across lines, a new line) are offered to
+ *              the editor first via a beforeinput, which Lexical needs. Only when the
+ *              browser refuses the commands do we write the field directly.
+ *  3. VERIFY — after the editor settles (one tick), the field must hold exactly the
+ *              expected text. If the editor reverted us (Gmail and Draft sometimes do on
+ *              the first try), try once more; if it landed wrong, put the text back.
+ *  4. REPORT — resolve true only when the fix is really in the field.
  */
-import { buildTextMap, offsetToRange, resolveInString, resolveSpan } from './textMap';
-
-export type EditorKind =
-  | 'input'
-  | 'textarea'
-  | 'draft'
-  | 'gmail'
-  | 'lexical'
-  | 'prosemirror'
-  | 'slate'
-  | 'quill'
-  | 'ckeditor'
-  | 'codemirror'
-  | 'contenteditable';
-
-export function detectEditor(el: HTMLElement): EditorKind {
-  if (el.tagName === 'INPUT') return 'input';
-  if (el.tagName === 'TEXTAREA') return 'textarea';
-  if (el.closest('.public-DraftEditor-content')) return 'draft';
-  // Gmail compose body: contenteditable that Gmail's own editor reconciles in
-  // the same frame, reverting a naive insert. Detected via stable selectors so
-  // we can give it the deferred re-apply below.
-  if (el.closest('div[g_editable="true"], div[aria-label="Message Body"][contenteditable="true"]')) {
-    return 'gmail';
-  }
-  if (el.closest('[data-lexical-editor="true"]')) return 'lexical';
-  if (el.closest('.ProseMirror')) return 'prosemirror';
-  if (el.closest('[data-slate-editor="true"]')) return 'slate';
-  if (el.closest('.ql-editor')) return 'quill';
-  if (el.closest('.ck-editor__editable')) return 'ckeditor';
-  if (el.closest('.cm-editor, .cm-content, .CodeMirror')) return 'codemirror';
-  return 'contenteditable';
-}
+import { buildTextMap, offsetToRange, pointToOffset, resolveInString } from './textMap';
 
 export interface Fix {
   original: string;
@@ -54,216 +30,249 @@ export interface Fix {
   replacement: string;
 }
 
-function fireInput(el: HTMLElement, replacement: string) {
+export interface ApplyOptions {
+  /** Leave the user's caret where it was (shifted past the edit) instead of after the
+   *  fix — for edits the user didn't ask for at that spot, like autocorrect. */
+  keepCaret?: boolean;
+}
+
+/** What the apply needs from a field, for both field families. Offsets are in the
+ *  field's text coordinates (`value`, or the shared text map for contenteditable). */
+interface Field {
+  text(): string;
+  /** Point the browser's selection at exactly [start, end) (a caret when equal).
+   *  False when that can't be guaranteed — editing commands would land elsewhere. */
+  select(start: number, end: number): boolean;
+  /** The caret offset, or null when the caret isn't in this field. */
+  caret(): number | null;
+  /** Delete the current (non-empty) selection. */
+  deleteSelection(): boolean;
+  /** Type `text` at the caret. */
+  insert(text: string): Promise<boolean>;
+  /** Direct write, for when the browser refuses its editing commands. */
+  write(start: number, end: number, text: string): void;
+}
+
+/** The focused element, descending through open shadow roots. */
+function deepActiveElement(): Element | null {
+  let el: Element | null = document.activeElement;
+  while (el?.shadowRoot?.activeElement) el = el.shadowRoot.activeElement;
+  return el;
+}
+
+/** execCommand only edits the FOCUSED field, so never run it on any other. */
+function hasFocus(el: HTMLElement): boolean {
+  const active = deepActiveElement();
+  return !!active && (active === el || el.contains(active));
+}
+
+function fireInput(el: HTMLElement, data: string) {
   try {
-    el.dispatchEvent(
-      new InputEvent('input', { bubbles: true, inputType: 'insertText', data: replacement }),
-    );
+    el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data }));
   } catch {
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
   el.dispatchEvent(new Event('change', { bubbles: true }));
 }
 
-/** input/textarea: execCommand keeps undo + notifies React/Vue; native
- *  prototype-setter is the fallback when execCommand is unavailable. */
-function applyToFormField(
-  el: HTMLInputElement | HTMLTextAreaElement,
-  fix: Fix,
-): boolean {
-  const val = el.value;
-  const span = resolveInString(val, fix.offset, fix.length, fix.original);
-  if (!span) return false;
-  el.focus();
-  try {
-    el.setSelectionRange(span.start, span.end);
-  } catch {
-    /* number/email inputs may not support selection — fall through */
-  }
-  const before = el.value;
-  let ok = false;
-  try {
-    ok = document.execCommand('insertText', false, fix.replacement);
-  } catch {
-    ok = false;
-  }
-  if (!ok || el.value === before) {
-    // React/Vue-safe: call the *prototype* value setter so framework
-    // value-trackers observe the change, then fire a bubbling input.
-    const proto =
-      el instanceof HTMLTextAreaElement
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-    const next = val.slice(0, span.start) + fix.replacement + val.slice(span.end);
-    if (setter) setter.call(el, next);
-    else el.value = next;
-    const caret = span.start + fix.replacement.length;
-    try {
-      el.setSelectionRange(caret, caret);
-    } catch {
-      /* noop */
-    }
-    fireInput(el, fix.replacement);
-    return true;
-  }
-  fireInput(el, fix.replacement);
-  return true;
+function formField(el: HTMLInputElement | HTMLTextAreaElement): Field {
+  return {
+    text: () => el.value,
+    select(start, end) {
+      if (!hasFocus(el)) return false;
+      try {
+        el.setSelectionRange(start, end);
+      } catch {
+        return false; // email/number inputs have no selection API
+      }
+      return el.selectionStart === start && el.selectionEnd === end;
+    },
+    caret: () => (hasFocus(el) ? el.selectionEnd : null),
+    deleteSelection: () => exec('delete'),
+    insert: async (text) => exec('insertText', text),
+    write(start, end, text) {
+      const value = el.value;
+      // The PROTOTYPE setter, so React/Vue value trackers notice the change.
+      const proto =
+        el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+      const setValue = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+      const next = value.slice(0, start) + text + value.slice(end);
+      if (setValue) setValue.call(el, next);
+      else el.value = next;
+      try {
+        el.setSelectionRange(start + text.length, start + text.length);
+      } catch {
+        /* no selection API */
+      }
+      fireInput(el, text);
+    },
+  };
 }
 
-/** contenteditable + framework editors: select the span, drive
- *  execCommand('insertText'); fall back to a minimal, caret-preserving
- *  DOM splice (never normalize()). After applying we VERIFY the insert
- *  actually landed (frameworks like Draft/Gmail/Lexical can silently revert
- *  it on their next reconcile tick) and retry once before giving up. */
-function applyToRichEditor(el: HTMLElement, fix: Fix, kind: EditorKind): boolean {
-  const map = buildTextMap(el);
-  const span = resolveSpan(map, fix.offset, fix.length, fix.original);
-  if (!span) return false;
-
-  // The EXACT field text we expect after a clean replace. Verifying against the whole
-  // expected string (not just "is the replacement present at the offset") is what
-  // distinguishes a real replacement from a duplicate insert — the "damn" → "DamnDamn"
-  // bug — because a duplicate makes the field longer than `expected` and never matches.
-  const before = map.text;
-  const expected = before.slice(0, span.start) + fix.replacement + before.slice(span.end);
-  const norm = (s: string) =>
-    s
-      .replace(/[​-‍﻿]/g, '') // zero-width chars (Lexical/Draft insert these)
-      .replace(/['‘’ʼ]/g, "'")
-      .replace(/["“”]/g, '"')
-      .replace(/\s+/g, ' ')
-      .trim();
-  const cleanlyReplaced = () => norm(buildTextMap(el).text) === norm(expected);
-
-  // Put the native selection exactly over the word. Re-resolves the span each call
-  // (so a retry works against the editor's CURRENT DOM) and returns the selected text,
-  // which the caller checks against `original` to confirm the WORD — not a collapsed
-  // caret — is selected. Returns null if the span can no longer be mapped.
-  const selectWord = (): string | null => {
-    const liveMap = buildTextMap(el);
-    const liveSpan = resolveSpan(liveMap, fix.offset, fix.length, fix.original);
-    if (!liveSpan) return null;
-    const range = offsetToRange(liveMap, liveSpan.start, liveSpan.end);
-    if (!range) return null;
-    el.focus();
-    const sel = window.getSelection();
-    if (!sel) return null;
-    sel.removeAllRanges();
-    sel.addRange(range);
-    return sel.toString();
-  };
-
-  // Replace the CURRENTLY SELECTED word with the fix. REFUSES to run on a collapsed or
-  // missing selection — inserting at a bare caret is what leaves the original word in
-  // place and appends a duplicate ("teh" → "teh the"). The TWO steps matter: a single
-  // `insertText` over a range is NOT honored by editors that keep their own selection
-  // model — Lexical (Facebook Messenger) inserts at its internal caret and never deletes
-  // the word, giving "tehthe". But `execCommand('delete')` on a range IS honored: it
-  // removes the selection and collapses to a caret, after which `insertText` lands
-  // cleanly. Verified same-frame against a real Lexical editor. Returns whether the
-  // field now equals the clean replacement.
-  const replaceSelection = (): boolean => {
-    const sel = window.getSelection();
-    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
-    // Capture the range for the DOM fallback BEFORE execCommand mutates the selection.
-    let fallbackRange: Range | null = null;
-    try {
-      fallbackRange = sel.getRangeAt(0).cloneRange();
-    } catch {
-      fallbackRange = null;
-    }
-    let handled = false;
-    try {
-      const delOk = document.execCommand('delete');
-      const insOk = document.execCommand('insertText', false, fix.replacement);
-      handled = delOk || insOk;
-    } catch {
-      handled = false;
-    }
-    if (!handled && fallbackRange) {
-      // execCommand unsupported (e.g. jsdom / a locked-down editor): splice the DOM
-      // directly — delete the selected word, insert, caret placed AFTER. Only here do we
-      // dispatch a synthetic `input`, because the manual splice fired no events. A
-      // SUCCESSFUL execCommand already dispatched a real, trusted beforeinput/input that
-      // the framework processed; firing another synthetic `input` would make editors
-      // that listen to it (Lexical) insert the replacement a SECOND time → "thethe".
-      try {
-        fallbackRange.deleteContents();
-        const tn = document.createTextNode(fix.replacement);
-        fallbackRange.insertNode(tn);
-        const after = document.createRange();
-        after.setStartAfter(tn);
-        after.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(after);
-      } catch {
-        return false;
+function richField(el: HTMLElement): Field {
+  return {
+    text: () => buildTextMap(el).text,
+    select(start, end) {
+      if (!hasFocus(el)) return false;
+      const range = offsetToRange(buildTextMap(el), start, end);
+      const sel = window.getSelection();
+      if (!range || !sel) return false;
+      sel.removeAllRanges();
+      sel.addRange(range);
+      return sel.rangeCount === 1 && el.contains(sel.anchorNode) && el.contains(sel.focusNode);
+    },
+    caret() {
+      const sel = window.getSelection();
+      if (!sel?.focusNode || !el.contains(sel.focusNode)) return null;
+      return pointToOffset(buildTextMap(el), sel.focusNode, sel.focusOffset);
+    },
+    deleteSelection: () => viaEditor(el, 'deleteContentBackward', 'delete'),
+    async insert(text) {
+      // Line by line. A new line goes in like Shift+Enter (never Enter, which chat boxes
+      // treat as "send"), and each step gets a tick so an editor with its own model has
+      // absorbed the previous edit before the next one.
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (i > 0 && !viaEditor(el, 'insertLineBreak', 'insertLineBreak')) return false;
+        if (lines[i] && !exec('insertText', lines[i])) return false;
+        await nextTick();
       }
-      fireInput(el, fix.replacement);
-    }
-    return cleanlyReplaced();
+      return true;
+    },
+    write(start, end, text) {
+      const range = offsetToRange(buildTextMap(el), start, end);
+      if (!range) return;
+      range.deleteContents();
+      if (text) {
+        const node = document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+      }
+      range.collapse(true);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      fireInput(el, text);
+    },
   };
+}
 
-  // One select + replace attempt against the editor's current DOM.
-  const attempt = (): boolean => {
-    if (selectWord() === null) return cleanlyReplaced(); // may have landed on a prior tick
-    return replaceSelection();
-  };
-
-  // Reconcile on a later tick, for editors that apply/revert ASYNCHRONOUSLY (Gmail and
-  // Draft can revert a same-frame edit on their next tick). Three outcomes:
-  //  - CLEAN replace → done.
-  //  - field UNCHANGED → the edit was a no-op (framework reverted us) → retry ONCE.
-  //  - field changed but NOT into the clean replacement → the edit landed WRONG
-  //    (duplicated the word: "damn" → "DamnDamn") → UNDO it so we never leave corrupted
-  //    text. We NEVER blindly re-insert after a change — that is exactly what compounds
-  //    into a duplicate. The field's own re-analysis re-flags the issue for a clean retry.
-  const reconcile = () => {
-    if (cleanlyReplaced()) return;
-    if (buildTextMap(el).text === before) {
-      attempt();
-      return;
-    }
-    try {
-      document.execCommand('undo');
-    } catch {
-      /* best effort — no worse than leaving the bad edit */
-    }
-  };
-
-  // Primary apply is synchronous and verifiable for EVERY editor: select the word, then
-  // delete-and-insert over that selection.
-  const clean = attempt();
-
-  if (kind !== 'contenteditable') {
-    // Framework editors (Lexical, Draft, Gmail, ProseMirror, Slate, Quill, CKEditor,
-    // CodeMirror) may reconcile on a later tick, so re-verify then — undoing a stray
-    // revert or duplicate. Report optimistic success; the caller's re-analysis re-flags
-    // if it didn't hold.
-    setTimeout(reconcile, 0);
-    return true;
+function exec(command: string, value?: string): boolean {
+  try {
+    return document.execCommand(command, false, value);
+  } catch {
+    return false;
   }
-
-  if (clean) return true;
-  // Plain contenteditable: the sync replace didn't verify. Reconcile once on the next
-  // tick (no-op → retry, bad edit → undo) and report the accurate sync result so a stale
-  // span keeps its underline.
-  setTimeout(reconcile, 0);
-  return false;
 }
 
 /**
- * Apply one correction to any editable element. Validates the span first
- * (re-finds `original` near the offset; returns false instead of
- * corrupting if it no longer matches). Returns true if applied.
+ * Run a structural edit through the editor's own input handling first. Editors that keep
+ * their own document model (Lexical — Facebook/Messenger) handle a beforeinput and cancel
+ * it, and they REVERT the browser's native edit whenever it changes their paragraph
+ * structure (a delete across lines, a new line). Every other field ignores the event,
+ * so the browser's editing command does the edit.
  */
-export function applyFix(element: HTMLElement, fix: Fix): boolean {
-  if (!fix.replacement && fix.replacement !== '') return false;
-  if (fix.original === fix.replacement) return false;
-  const kind = detectEditor(element);
-  if (kind === 'input' || kind === 'textarea') {
-    return applyToFormField(element as HTMLInputElement | HTMLTextAreaElement, fix);
+function viaEditor(el: HTMLElement, inputType: string, command: string): boolean {
+  const event = new InputEvent('beforeinput', { inputType, bubbles: true, cancelable: true });
+  return !el.dispatchEvent(event) || exec(command);
+}
+
+/** Replace [start, end) with `text`: the browser's editing pipeline when it can reach
+ *  the field, otherwise a direct write. */
+async function replace(field: Field, start: number, end: number, text: string): Promise<void> {
+  if (!field.select(start, end)) {
+    field.write(start, end, text);
+    return;
   }
-  return applyToRichEditor(element, fix, kind);
+  await nextTick(); // let an editor with its own model (Lexical) adopt the selection
+  // Delete only a real selection — on a bare caret it would eat a character.
+  if (end > start && !field.deleteSelection()) {
+    field.write(start, end, text);
+    return;
+  }
+  if (text && !(await field.insert(text))) field.write(start, start, text);
+}
+
+/** Compare field text, ignoring what editors change on their own: zero-width
+ *  characters (Lexical/Draft), &nbsp; for spaces, quote glyphs, and the outer
+ *  whitespace a trailing <br> or block adds. Inner spacing still counts, so a
+ *  double-space fix is never "already done". */
+function sameText(a: string, b: string): boolean {
+  const norm = (s: string) =>
+    s
+      .replace(/[​-‍﻿]/g, '')
+      .replace(/ /g, ' ')
+      .replace(/['‘’ʼ]/g, "'")
+      .replace(/["“”]/g, '"')
+      .trim();
+  return norm(a) === norm(b);
+}
+
+/** Put `before` back after an edit landed wrong, by replacing only the region that
+ *  differs (works in editors where execCommand('undo') is a no-op, e.g. Lexical). */
+async function restore(field: Field, now: string, before: string): Promise<void> {
+  let p = 0;
+  while (p < now.length && p < before.length && now[p] === before[p]) p++;
+  let s = 0;
+  while (
+    s < now.length - p &&
+    s < before.length - p &&
+    now[now.length - 1 - s] === before[before.length - 1 - s]
+  ) {
+    s++;
+  }
+  await replace(field, p, now.length - s, before.slice(p, before.length - s));
+}
+
+/** Where a caret ends up after [start, end) is replaced by `length` characters. */
+function shiftCaret(caret: number, start: number, end: number, length: number): number {
+  if (caret <= start) return caret; // before the edit: unaffected
+  if (caret >= end) return caret + length - (end - start); // after it: shifts with the text
+  return start + length; // inside the replaced text: just after the fix
+}
+
+const nextTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Apply one correction to any editable element. Resolves true only if the field
+ * now holds the corrected text; false (with the field unchanged) if the span no
+ * longer matches or the editor wouldn't take the edit.
+ */
+export async function applyFix(
+  element: HTMLElement,
+  fix: Fix,
+  options: ApplyOptions = {},
+): Promise<boolean> {
+  if (fix.original === fix.replacement) return false;
+  // tagName, not instanceof: elements inside iframes come from another realm.
+  const field =
+    element.tagName === 'INPUT' || element.tagName === 'TEXTAREA'
+      ? formField(element as HTMLInputElement | HTMLTextAreaElement)
+      : richField(element);
+
+  const before = field.text();
+  const span = resolveInString(before, fix.offset, fix.length, fix.original);
+  if (!span) return false;
+  const expected = before.slice(0, span.start) + fix.replacement + before.slice(span.end);
+  const caret = options.keepCaret ? field.caret() : null;
+
+  element.focus();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await replace(field, span.start, span.end, fix.replacement);
+    await nextTick(); // let the editor run its own update/reconcile
+    const now = field.text();
+    if (sameText(now, expected)) {
+      if (caret !== null) {
+        const at = shiftCaret(caret, span.start, span.end, fix.replacement.length);
+        field.select(at, at);
+      }
+      return true;
+    }
+    if (!sameText(now, before)) {
+      await restore(field, now, before);
+      return false;
+    }
+    // Unchanged: the editor reverted or ignored the edit — one more try.
+  }
+  return false;
 }

@@ -11,9 +11,9 @@
  *    but the compose window mounts/remounts lazily (SPA). The main script's
  *    one-shot focus check on load misses it. We watch for the compose body /
  *    subject mounting and nudge index.ts to activate them.
- *  - The actual apply-revert problem (Gmail reverting our insert in the same
- *    frame) is fixed separately in editorAdapter.ts via the 'gmail' EditorKind
- *    and its Draft-style deferred re-apply.
+ *  - Gmail sometimes reverting our first insert is handled generically by
+ *    editorAdapter.ts (verify after the editor settles, retry once) — no
+ *    Gmail-specific apply code.
  *
  * The nudge is a bubbling, composed `focusin` dispatched on the field: index.ts
  * listens for `focusin` on the document (capture phase) and activates editable

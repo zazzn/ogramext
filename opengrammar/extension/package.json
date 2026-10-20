@@ -12,6 +12,7 @@
     "test:suggestions": "node scripts/test-suggestion-corpus.mjs",
     "simulate:inline": "node scripts/simulate-inline.mjs",
     "simulate:protected": "node scripts/simulate-protected.mjs",
+    "harness:apply": "node scripts/apply-harness.mjs",
     "predev": "node scripts/copy-harper-wasm.mjs",
     "dev": "vite",
     "prebuild": "node scripts/copy-harper-wasm.mjs",

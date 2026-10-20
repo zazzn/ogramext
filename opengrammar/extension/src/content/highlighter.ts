@@ -11,6 +11,10 @@ import { applyFix } from './editorAdapter';
 import { stripQuotedBBCode } from './textExtractor';
 import { getApiKey } from '../shared/apiKeyStore';
 import { findProtectedSpans, type ProtectedSpan } from '../shared/protectedText';
+import prompts from '../shared/prompts.json';
+
+/** The tone choices, in menu order — the same list the desktop + mobile apps show. */
+const TONES: [string, string][] = prompts.rewrite.tones.map((t) => [t.id, t.label]);
 
 let currentTooltip: HTMLElement | null = null;
 let currentRephrasePanel: HTMLElement | null = null;
@@ -545,21 +549,6 @@ function renderInputUnderlines(element: HTMLElement, issues: Issue[]) {
   cacheUnderlineBase(element);
 }
 
-/**
- * Apply a single correction to a contenteditable using the shared map.
- * Validates the span still matches `original` (rebasing if the user edited),
- * and drops the fix instead of corrupting text when it no longer matches.
- * Returns true if applied.
- */
-function applyContentEditableFix(element: HTMLElement, issue: Issue): boolean {
-  return applyFix(element, {
-    original: issue.original,
-    offset: issue.offset,
-    length: issue.length,
-    replacement: issue.suggestion,
-  });
-}
-
 /** Replace one whole sentence span with the LLM-corrected text — same
  *  validated one-primitive path as every other apply. */
 function replaceSentence(
@@ -567,7 +556,7 @@ function replaceSentence(
   origText: string,
   approxOffset: number,
   newText: string,
-): boolean {
+): Promise<boolean> {
   return applyFix(element, {
     original: origText,
     offset: approxOffset,
@@ -851,11 +840,11 @@ function showSpellingMenu(anchor: HTMLElement, issue: Issue, element: HTMLElemen
   menu.querySelectorAll<HTMLButtonElement>('.og-sp-opt').forEach((btn) => {
     btn.addEventListener('mouseenter', () => { btn.style.background = '#E7F4EC'; });
     btn.addEventListener('mouseleave', () => { btn.style.background = '#fff'; });
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('click', async (e) => {
       e.stopPropagation();
       const i = Number(btn.dataset.i || 0);
       const chosen = options[i]!;
-      if (applySuggestion(element, { ...issue, suggestion: chosen }, anchor)) {
+      if (await applySuggestion(element, { ...issue, suggestion: chosen })) {
         removeIssueUnderline(issue, element);
         menu.remove(); currentSpellMenu = null;
       } else {
@@ -1036,6 +1025,11 @@ export function setAssistantState(element: HTMLElement, state: AssistantState) {
     bubble.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
       if (!assistantTarget) return;
+      // Nothing to fix → offer a tone rewrite of the whole message (+ an AI check).
+      if (assistantBubbleIssues.length === 0) {
+        openWholeMessageMenu(bubble, assistantTarget);
+        return;
+      }
       // Grammar/clarity/style → whole-sentence review.
       // Spelling is handled inline via right/left-click on the underline.
       showSentenceReview(assistantBubbleIssues, assistantTarget, 0);
@@ -1129,10 +1123,32 @@ export function updateSelectionBubble(
 }
 
 function openSelectionMenu(anchor: HTMLElement) {
+  if (!selectionTarget || !selectionText) return;
+  openRewriteMenu(anchor, selectionTarget, selectionText, selectionApproxOffset, 'Rewrite selection');
+}
+
+/** The in-field badge on a field with nothing to fix: rewrite the WHOLE message in a
+ *  tone — the same action as the desktop app's pen beside the field. */
+function openWholeMessageMenu(anchor: HTMLElement, el: HTMLElement) {
+  const full = getFullText(el);
+  const body = full.trim();
+  if (body.length < 2) return;
+  openRewriteMenu(anchor, el, body, full.indexOf(body), 'Rewrite message', () =>
+    showSentenceReview(assistantBubbleIssues, el, 0),
+  );
+}
+
+/** Tone menu → preview → Apply for `sel` (the text at ~`offset` in `el`). With
+ *  `onReview`, a footer link also offers the AI sentence review. */
+function openRewriteMenu(
+  anchor: HTMLElement,
+  el: HTMLElement,
+  sel: string,
+  offset: number,
+  title: string,
+  onReview?: () => void,
+) {
   document.querySelector('.og-selection-menu')?.remove();
-  const el = selectionTarget;
-  const sel = selectionText;
-  if (!el || !sel) return;
 
   const menu = document.createElement('div');
   menu.className = 'og-selection-menu';
@@ -1145,16 +1161,21 @@ function openSelectionMenu(anchor: HTMLElement) {
   `;
   menu.innerHTML = `
     <div style="font-size:12px;font-weight:700;color:#111827;margin-bottom:8px;">
-      Rewrite selection
+      ${escapeHtml(title)}
     </div>
     <div class="og-sel-chips" style="display:flex;flex-wrap:wrap;gap:6px;"></div>
     <div class="og-sel-status" style="display:none;margin-top:8px;font-size:12px;color:#6b7280;"></div>
+    ${onReview ? `<button class="og-sel-review" type="button" style="display:block;width:100%;margin-top:8px;
+      padding:4px;background:none;border:none;color:#127A48;font-size:11px;font-weight:600;
+      cursor:pointer;font-family:inherit;">Check the whole text with AI →</button>` : ''}
   `;
   const chips = menu.querySelector('.og-sel-chips') as HTMLElement;
   const status = menu.querySelector('.og-sel-status') as HTMLElement;
-  const TONES: [string, string][] = [
-    ['polish', 'Polish'], ['formal', 'Formal'], ['casual', 'Casual'],
-  ];
+  menu.querySelector('.og-sel-review')?.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    menu.remove();
+    onReview?.();
+  });
   for (const [tone, label] of TONES) {
     const chip = document.createElement('button');
     chip.type = 'button';
@@ -1193,10 +1214,14 @@ function openSelectionMenu(anchor: HTMLElement) {
       </div>
       <div style="font-size:10px;color:#8e8e93;margin-top:5px;text-align:center;">Pick another tone above to re-preview.</div>
     `;
-    (status.querySelector('.og-sel-apply') as HTMLButtonElement)?.addEventListener('click', (ev) => {
+    (status.querySelector('.og-sel-apply') as HTMLButtonElement)?.addEventListener('click', async (ev) => {
       ev.stopPropagation();
       if (!pending) return;
-      const ok = replaceSentence(el, sel, selectionApproxOffset, pending.text);
+      // Keep the selection's own surrounding whitespace: double-clicking a word on
+      // Windows selects its trailing space, which the trimmed rewrite would drop.
+      const lead = sel.slice(0, sel.length - sel.trimStart().length);
+      const trail = sel.slice(sel.trimEnd().length);
+      const ok = await replaceSentence(el, sel, offset, lead + pending.text + trail);
       if (ok) {
         menu.remove();
         updateSelectionBubble(null, '', 0);
@@ -1221,13 +1246,13 @@ function openSelectionMenu(anchor: HTMLElement) {
     status.style.display = 'block';
     status.textContent = `Rewriting (${chip.textContent})…`;
     chrome.runtime.sendMessage(
-      { type: 'REWRITE_TEXT', text: sel, tone: chip.dataset.tone },
+      { type: 'REWRITE_TEXT', text: sel.trim(), tone: chip.dataset.tone },
       (resp) => {
         busy = false;
         chips.style.opacity = '';
         chips.style.pointerEvents = '';
         const rewritten = resp && resp.rewritten ? String(resp.rewritten).trim() : '';
-        if (!rewritten || rewritten === sel) {
+        if (!rewritten || rewritten === sel.trim()) {
           pending = null;
           status.textContent =
             resp && resp.error ? 'Rewrite failed — check provider/API key.' : 'No change suggested.';
@@ -1381,10 +1406,10 @@ function showInlineReviewCard(anchor: HTMLElement, issue: Issue, element: HTMLEl
 
   card.addEventListener('mousedown', (e) => e.preventDefault());
 
-  const accept = () => {
+  const accept = async () => {
     // Only drop the underline if the validated apply actually landed; a stale
     // span (text moved/changed since analysis) keeps its underline.
-    if (applySuggestion(element, issue, anchor)) {
+    if (await applySuggestion(element, issue)) {
       removeIssueUnderline(issue, element);
       hideTooltip();
       return;
@@ -1560,9 +1585,9 @@ function showTooltip(anchor: HTMLElement, issue: Issue, element: HTMLElement) {
   // Suggestion click = apply fix
   const suggClick = card.querySelector('.og-suggestion-click') as HTMLElement;
   if (suggClick) {
-    suggClick.addEventListener('click', (e) => {
+    suggClick.addEventListener('click', async (e) => {
       e.stopPropagation();
-      if (applySuggestion(element, issue, anchor)) hideTooltip();
+      if (await applySuggestion(element, issue)) hideTooltip();
       else flashApplyFailure(card);
     });
     suggClick.addEventListener('mouseenter', () => { suggClick.style.background = '#D6ECDD'; });
@@ -1573,9 +1598,9 @@ function showTooltip(anchor: HTMLElement, issue: Issue, element: HTMLElement) {
   const rephraseBtn = card.querySelector('.og-rephrase-btn') as HTMLButtonElement;
   const ignoreBtn = card.querySelector('.og-ignore-btn') as HTMLButtonElement;
 
-  applyBtn.addEventListener('click', (e) => {
+  applyBtn.addEventListener('click', async (e) => {
     e.stopPropagation(); e.preventDefault();
-    if (applySuggestion(element, issue, anchor)) hideTooltip();
+    if (await applySuggestion(element, issue)) hideTooltip();
     else flashApplyFailure(card);
   });
   applyBtn.addEventListener('mouseenter', () => { applyBtn.style.background = '#127A48'; });
@@ -1583,7 +1608,7 @@ function showTooltip(anchor: HTMLElement, issue: Issue, element: HTMLElement) {
 
   rephraseBtn.addEventListener('click', (e) => {
     e.stopPropagation(); e.preventDefault();
-    showRephrasePanel(card, issue, element, anchor);
+    showRephrasePanel(card, issue, element);
   });
   rephraseBtn.addEventListener('mouseenter', () => { rephraseBtn.style.background = '#f8f9fa'; });
   rephraseBtn.addEventListener('mouseleave', () => { rephraseBtn.style.background = 'white'; });
@@ -1615,7 +1640,7 @@ function showTooltip(anchor: HTMLElement, issue: Issue, element: HTMLElement) {
 /* ────────────────────────────────────────────────────────────
    REPHRASE PANEL (slides below tooltip card)
 ──────────────────────────────────────────────────────────── */
-function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTMLElement, highlightAnchor: HTMLElement) {
+function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTMLElement) {
   currentRephrasePanel?.remove();
 
   const panel     = document.createElement('div');
@@ -1836,10 +1861,10 @@ function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTML
       // Wire "Use" buttons
       content.querySelectorAll('.og-use-btn').forEach((btn) => {
         const useBtn = btn as HTMLButtonElement;
-        useBtn.addEventListener('click', (e) => {
+        useBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
           const text = useBtn.dataset.text ? decodeHtmlEntities(useBtn.dataset.text) : '';
-          if (text && element && !applySuggestion(element, { ...issue, suggestion: text }, highlightAnchor)) {
+          if (text && element && !(await applySuggestion(element, { ...issue, suggestion: text }))) {
             if (currentRephrasePanel) flashApplyFailure(currentRephrasePanel);
             return;
           }
@@ -2552,9 +2577,9 @@ function showSentenceReview(
     }
   };
 
-  const acceptSentence = () => {
+  const acceptSentence = async () => {
     const apply = currentText;
-    const ok = replaceSentence(element, origText, group.start, apply);
+    const ok = await replaceSentence(element, origText, group.start, apply);
     // A stale span (text edited since analysis) or a framework that reverted the
     // insert returns false. Don't advance/close as if it worked — keep the card
     // open and surface the failure so it isn't silent.
@@ -2608,14 +2633,14 @@ function showSentenceReview(
 
   const fixAllBtn = card.querySelector('.og-sr-fix-all') as HTMLButtonElement | null;
   if (fixAllBtn) {
-    fixAllBtn.addEventListener('click', (e) => {
+    fixAllBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       // Apply highest-offset first so earlier spans stay valid.
       const ordered = [...groups].sort((a, b) => b.start - a.start);
       const total = ordered.length;
       const failed: typeof groups = [];
       for (const g of ordered) {
-        const ok = replaceSentence(element, (g.origText ?? '').trim(), g.start, (g.corrText ?? '').trim());
+        const ok = await replaceSentence(element, (g.origText ?? '').trim(), g.start, (g.corrText ?? '').trim());
         // A stale span / silently-reverted insert returns false. Collect it so
         // we don't close the card claiming every sentence was fixed.
         if (!ok) failed.push(g);
@@ -2678,11 +2703,6 @@ function showSentenceReview(
   const improveMenu = card.querySelector('.og-sr-improve-menu') as HTMLElement | null;
   const improveStatus = card.querySelector('.og-sr-improve-status') as HTMLElement | null;
   if (improveToggle && improveMenu && improveStatus) {
-    const TONES: [string, string][] = [
-      ['polish', 'Polish'],
-      ['formal', 'Formal'],
-      ['casual', 'Casual'],
-    ];
     for (const [tone, label] of TONES) {
       const chip = document.createElement('button');
       chip.type = 'button';
@@ -2884,11 +2904,11 @@ function flashApplyFailure(card: HTMLElement, message = "Couldn't apply here —
   );
 }
 
-function applySuggestion(element: HTMLElement, issue: Issue, highlightEl: HTMLElement): boolean {
+async function applySuggestion(element: HTMLElement, issue: Issue): Promise<boolean> {
   // One validated apply primitive for every field/editor type. It rejects stale
   // or ambiguous spans, so a failed apply must NOT be treated as success (the
   // underline should stay put rather than vanish without the text changing).
-  const ok = applyFix(element, {
+  const ok = await applyFix(element, {
     original: issue.original,
     offset: issue.offset,
     length: issue.length,
@@ -2901,7 +2921,6 @@ function applySuggestion(element: HTMLElement, issue: Issue, highlightEl: HTMLEl
       payload: { count: 1, domain: window.location.hostname },
     });
   }
-  void highlightEl;
   return ok;
 }
 

@@ -181,16 +181,8 @@ export interface AnalyzeResponse {
 
 export interface RewriteRequest {
   text: string;
-  tone:
-    | 'polish'
-    | 'formal'
-    | 'casual'
-    | 'professional'
-    | 'friendly'
-    | 'concise'
-    | 'detailed'
-    | 'persuasive'
-    | 'neutral';
+  /** A tone id from shared/prompts.json (polish | formal | casual). */
+  tone: string;
   apiKey?: string;
   model?: string;
   provider?: LLMProvider;

@@ -37,3 +37,6 @@ desktop/**/config.json
 # packaged extension zip for the Chrome Web Store
 opengrammar/extension/ogrammar-*.zip
 opengrammar/extension/store-screenshots/
+
+# Apply-harness bundle (built by `npm run harness:apply`)
+opengrammar/extension/scripts/apply-harness/bundle.js

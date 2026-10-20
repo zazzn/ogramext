@@ -143,28 +143,30 @@ function pruneRecentApplies(now: number): void {
   }
 }
 
-/** Move the caret to the very end of the field after we edit it. */
-function moveCaretToEnd(element: HTMLElement): void {
-  if (element.tagName === 'INPUT' || element.tagName === 'TEXTAREA') {
-    const el = element as HTMLInputElement | HTMLTextAreaElement;
-    try {
-      el.setSelectionRange(el.value.length, el.value.length);
-    } catch {
-      /* some input types don't support selection */
-    }
-    return;
+/**
+ * Auto-apply `issues` (already sorted right-to-left, so earlier offsets stay valid as
+ * the text shifts) while leaving the user's caret where it was. Stops if the user
+ * moves focus away mid-batch. Records each apply for revert-learning.
+ */
+async function applyInPlace(
+  element: HTMLElement,
+  preText: string,
+  issues: Issue[],
+): Promise<Issue[]> {
+  const applied: Issue[] = [];
+  for (const issue of issues) {
+    if (deepActiveElement() !== element) break;
+    const { original, offset, length, suggestion } = issue;
+    const ok = await applyFix(
+      element,
+      { original, offset, length, replacement: suggestion },
+      { keepCaret: true },
+    );
+    if (!ok) continue;
+    applied.push(issue);
+    recentApplies.push({ preText, original, suggestion, at: Date.now() });
   }
-  const sel = window.getSelection();
-  if (!sel) return;
-  try {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(false);
-    sel.removeAllRanges();
-    sel.addRange(range);
-  } catch {
-    /* noop */
-  }
+  return applied;
 }
 
 /**
@@ -240,29 +242,7 @@ export function maybeAutocorrect(
   // that the field is still focused.
   const applyEligible = () => {
     pendingTimer = null;
-    if (deepActiveElement() !== element) return;
-    let appliedAny = false;
-    for (const issue of eligible) {
-      const ok = applyFix(element, {
-        original: issue.original,
-        offset: issue.offset,
-        length: issue.length,
-        replacement: issue.suggestion,
-      });
-      if (ok) {
-        appliedAny = true;
-        recentApplies.push({
-          preText: text,
-          original: issue.original,
-          suggestion: issue.suggestion,
-          at: Date.now(),
-        });
-      }
-    }
-    if (appliedAny) {
-      // We only act when the caret was already at the end, so end is correct.
-      moveCaretToEnd(element);
-    }
+    void applyInPlace(element, text, eligible);
   };
 
   cancelPendingAutocorrect();
@@ -291,39 +271,20 @@ export interface SettledApplyResult {
  * caller wires capture + re-lint. Applies right-to-left so earlier offsets stay
  * valid as the text length shifts.
  */
-export function applySettledQuickFixes(
+export async function applySettledQuickFixes(
   element: HTMLElement,
   text: string,
   issues: Issue[],
-): SettledApplyResult {
-  const appliedIds = new Set<string>();
-  const applied: Array<{ original: string; suggestion: string }> = [];
-  if (deepActiveElement() !== element) return { appliedIds, applied };
-
+): Promise<SettledApplyResult> {
   const eligible = issues
     .filter((i) => i.route === 'quick-fix' && !!i.suggestion && i.suggestion !== i.original)
     .filter((i) => !isRejected(i.original, i.suggestion))
     .sort((a, b) => b.offset - a.offset);
-  if (eligible.length === 0) return { appliedIds, applied };
 
   pruneRecentApplies(Date.now());
-  for (const issue of eligible) {
-    const ok = applyFix(element, {
-      original: issue.original,
-      offset: issue.offset,
-      length: issue.length,
-      replacement: issue.suggestion,
-    });
-    if (ok) {
-      appliedIds.add(issue.id ?? `${issue.offset}-${issue.original}`);
-      applied.push({ original: issue.original, suggestion: issue.suggestion });
-      recentApplies.push({
-        preText: text,
-        original: issue.original,
-        suggestion: issue.suggestion,
-        at: Date.now(),
-      });
-    }
-  }
-  return { appliedIds, applied };
+  const done = await applyInPlace(element, text, eligible);
+  return {
+    appliedIds: new Set(done.map((i) => i.id ?? `${i.offset}-${i.original}`)),
+    applied: done.map((i) => ({ original: i.original, suggestion: i.suggestion })),
+  };
 }
