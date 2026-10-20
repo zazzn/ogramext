@@ -34,6 +34,12 @@ The instructions live in one file, `opengrammar/extension/src/shared/prompts.jso
 Read the preview, then **Apply** or **Cancel** — pick another tone to re-preview. Ctrl+Z
 undoes an applied rewrite.
 
+### Rephrase: three alternatives for one sentence
+
+On a grammar card (red underline), **Rephrase** offers three AI rewrites of the whole
+sentence around the issue. Choose a goal — **Clearer**, **More Formal**, **Concise** or
+**Friendlier** — and click **Use** on the one you like.
+
 ---
 
 ## Troubleshooting

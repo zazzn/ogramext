@@ -1660,12 +1660,15 @@ function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTML
     animation: og-fade-in 0.12s ease;
   `;
 
-  const goals = [
-    { id: 'clarity',  icon: '🎯', label: 'Clearer' },
-    { id: 'formal',   icon: '👔', label: 'More Formal' },
-    { id: 'concise',  icon: '✂️', label: 'Concise' },
-    { id: 'friendly', icon: '😊', label: 'Friendlier' },
-  ];
+  // Goals + their AI wording come from the shared prompts.json (the desktop shows the same).
+  const GOAL_ICONS: Record<string, string> = { clarity: '🎯', formal: '👔', concise: '✂️', friendly: '😊' };
+  const goals = prompts.rephrase.goals.map((g) => ({ id: g.id, icon: GOAL_ICONS[g.id] || '✨', label: g.label }));
+  // Rephrase the whole SENTENCE around the issue — what the panel shows and what Use
+  // replaces — falling back to the flagged text if the sentence can't be found.
+  const target = sentenceAround(getFullText(element), issue.offset) ?? {
+    start: issue.offset,
+    text: issue.original,
+  };
 
   panel.innerHTML = `
     <div style="padding: 12px 14px; border-bottom: 1px solid #f0f0f0; display:flex;align-items:center;justify-content:space-between;">
@@ -1728,7 +1731,7 @@ function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTML
         padding: 7px 10px; line-height: 1.45;
         border: 1px solid #f0f0f0;
         word-break: break-word;
-      ">${escapeHtml(issue.original)}</div>
+      ">${escapeHtml(target.text)}</div>
     </div>
 
     <div style="padding: 0 14px 12px;">
@@ -1811,7 +1814,7 @@ function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTML
       const data: { suggestions?: { text: string; label: string }[]; explanation?: string } =
         await chrome.runtime.sendMessage({
           type: 'REPHRASE_TEXT',
-          sentence: issue.original,
+          sentence: target.text,
           goal,
         });
       const suggestions = data?.suggestions || [];
@@ -1864,7 +1867,14 @@ function showRephrasePanel(tooltipCard: HTMLElement, issue: Issue, element: HTML
         useBtn.addEventListener('click', async (e) => {
           e.stopPropagation();
           const text = useBtn.dataset.text ? decodeHtmlEntities(useBtn.dataset.text) : '';
-          if (text && element && !(await applySuggestion(element, { ...issue, suggestion: text }))) {
+          const sentenceFix = {
+            ...issue,
+            original: target.text,
+            offset: target.start,
+            length: target.text.length,
+            suggestion: text,
+          };
+          if (text && element && !(await applySuggestion(element, sentenceFix))) {
             if (currentRephrasePanel) flashApplyFailure(currentRephrasePanel);
             return;
           }
@@ -1953,6 +1963,15 @@ function splitSentences(s: string): Array<{ start: number; end: number; text: st
 
   if (start < s.length) push(s.length);
   return out;
+}
+
+/** The sentence containing `offset`, trimmed, with its start — what Rephrase rewrites.
+ *  Same rule as the desktop's `sentence_span`. */
+function sentenceAround(text: string, offset: number): { start: number; text: string } | null {
+  const piece = splitSentences(text).find((s) => offset >= s.start && offset < s.end);
+  if (!piece) return null;
+  const lead = piece.text.length - piece.text.trimStart().length;
+  return { start: piece.start + lead, text: piece.text.trim() };
 }
 
 /**

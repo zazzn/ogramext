@@ -627,36 +627,29 @@ async function handleRewrite(text: string, tone: string, sendResponse: (response
   }
 }
 
-// Multi-suggestion rephrase (the floating bubble's "alternatives" panel).
-// SYSTEM_PROMPT / goal descriptions ported verbatim from the former backend
-// Rephraser (backend/src/rephraser.ts). Returns the same shape the bubble
-// rendering expects: { suggestions:[{text,label}], explanation, bestMatch }.
-const REPHRASE_GOALS: Record<string, string> = {
-  clarity: 'clearer and easier to understand',
-  formal: 'more formal and professional',
-  concise: 'shorter and more concise (remove filler words)',
-  friendly: 'warmer, friendlier, and more approachable',
-};
-const REPHRASE_SYSTEM_PROMPT = `You are an expert writing assistant. Rewrite the given sentence in exactly 3 different ways.
+// Multi-suggestion rephrase (the review card's "alternatives" panel). The prompt and
+// goals live in the shared prompts.json (the desktop app uses the same ones). Returns
+// the shape the panel renders: { suggestions:[{text,label}], explanation, bestMatch }.
 
-Rules:
-1. Keep the core meaning intact
-2. Apply the requested goal (clarity/formal/concise/friendly)
-3. Each rewrite must be meaningfully different from the others
-4. Keep the same approximate length unless goal is "concise"
-5. Preserve URLs, email addresses, file paths, code, @mentions, #hashtags, IDs, and version strings exactly as written
-6. Return ONLY a JSON object — no preamble, no markdown
-
-Format:
-{
-  "suggestions": [
-    { "text": "First rewrite", "label": "Option 1" },
-    { "text": "Second rewrite", "label": "Option 2" },
-    { "text": "Third rewrite", "label": "Option 3" }
-  ],
-  "explanation": "One sentence explaining what was improved",
-  "bestMatch": 0
-}`;
+/** Up to three usable alternatives from the model's `suggestions` — the same filter as
+ *  the desktop's `parse_rephrase`: non-empty, not the unchanged sentence, no repeats,
+ *  and every URL/@handle/code/ID/version kept verbatim. */
+function usableRephrasings(
+  sentence: string,
+  raw: unknown,
+): { text: string; label: string }[] {
+  const seen = new Set<string>();
+  const out: { text: string; label: string }[] = [];
+  for (const s of Array.isArray(raw) ? raw : []) {
+    const text = String(typeof s === 'string' ? s : (s?.text ?? '')).trim();
+    if (!text || text === sentence.trim() || seen.has(text)) continue;
+    if (!preservesProtectedFragments(sentence, text)) continue;
+    seen.add(text);
+    out.push({ text, label: (typeof s === 'object' && s?.label) || 'Option' });
+    if (out.length === 3) break;
+  }
+  return out;
+}
 
 async function rephraseText(
   sentence: string,
@@ -685,32 +678,32 @@ async function rephraseText(
         bestMatch: 0,
       };
     }
-    const adjective = REPHRASE_GOALS[goal] || REPHRASE_GOALS.clarity;
+    const goalSpec =
+      prompts.rephrase.goals.find((g) => g.id === goal) || prompts.rephrase.goals[0];
     const raw = await chatCompletion({
       apiKey,
       baseURL: resolveBaseUrl(provider, customBaseUrl, ollamaUrl),
       model: model || 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: REPHRASE_SYSTEM_PROMPT },
+        { role: 'system', content: prompts.rephrase.system },
         {
           role: 'user',
-          content: `Rewrite this sentence in 3 ways that are ${adjective}:\n\n"${sentence}"`,
+          content: prompts.rephrase.user
+            .replace('{goal}', goalSpec.description)
+            .replace('{text}', () => sentence),
         },
       ],
+      // Varied on purpose (three DIFFERENT alternatives); the budget fits three
+      // rewrites of a long sentence plus the JSON around them.
       temperature: 0.7,
-      maxTokens: 512,
+      maxTokens: Math.min(4000, Math.max(512, sentence.length * 2 + 300)),
       responseFormat: { type: 'json_object' },
       extraBody: ollamaKeepAliveParam(provider, ollamaKeepAlive),
       nativeOllama: provider === 'ollama',
     });
     const cleaned = (raw || '{}').replace(/^```json\s*/, '').replace(/\s*```$/, '');
     const parsed = JSON.parse(cleaned);
-    const suggestions = (parsed.suggestions || [])
-      .map((s: { text?: string; label?: string }) => ({
-        text: s.text || String(s),
-        label: s.label || 'Option',
-      }))
-      .filter((s: { text: string }) => preservesProtectedFragments(sentence, s.text));
+    const suggestions = usableRephrasings(sentence, parsed.suggestions);
     const result = {
       suggestions,
       explanation: parsed.explanation || '',
