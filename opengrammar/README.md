@@ -30,10 +30,11 @@ bubble below).
 
 ## Features
 
-- **Selection rewrite bubble** — highlight any text in an editable field
-  (errors or not) and a bubble appears; pick **Polish / Formal / Casual**
-  and it shows a **preview you must Apply or Cancel** (nothing changes
-  until you confirm; pick another tone to re-preview).
+- **Tone rewrite** — highlight any text in an editable field (errors or
+  not) and a pen appears; or, when the field has nothing to fix, click the
+  OGrammar badge to rewrite the whole message. Pick **Polish / Formal /
+  Casual** and it shows a **preview you must Apply or Cancel** (nothing
+  changes until you confirm; pick another tone to re-preview).
 - **Sentence review card** — click an inline issue for the corrected
   version with the same Improve preview/confirm flow.
 - **Direct multi-provider LLM** — OpenAI · OpenRouter · Groq · Together AI ·

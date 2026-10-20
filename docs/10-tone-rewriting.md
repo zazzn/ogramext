@@ -1,409 +1,53 @@
-# 🎨 Tone Rewriting Guide
+# 🎨 Tone Rewriting
 
-Master the art of rewriting text in different tones with OGrammar.
+OGrammar can rewrite your text in a different tone — fixing its spelling and grammar along
+the way — without changing what you mean. You always see a preview first; nothing changes
+until you click **Apply**.
 
----
-
-## 📋 Overview
-
-Tone rewriting allows you to transform your text into different styles while preserving the original meaning.
-
----
-
-## 🎭 Available Tones
-
-### 1. Formal 🎩
-
-**Use for:** Academic writing, business proposals, official communications
-
-**Characteristics:**
-- Professional vocabulary
-- Complete sentences
-- Proper grammar
-- Respectful language
-
-**Examples:**
-```
-Input:  "hey whats up"
-Output: "Greetings, how are you?"
-
-Input:  "i wanna talk bout the thing"
-Output: "I would like to discuss the matter"
-
-Input:  "gonna need this asap"
-Output: "I will require this as soon as possible"
-```
+Tone rewriting uses your AI provider — set one up in **Options** first
+([07-ai-providers.md](07-ai-providers.md)).
 
 ---
 
-### 2. Casual 😊
+## The three tones
 
-**Use for:** Social media, text messages, informal emails
+| Tone | What it does | Good for |
+|------|--------------|----------|
+| **Polish** | Fixes spelling, grammar, and awkward phrasing; keeps your tone and length. | Anything you're about to send |
+| **Formal** | Professional and business-appropriate; no slang or contractions. | Work email, proposals, official messages |
+| **Casual** | Relaxed and friendly, like a message to a friend. | Chat, social posts, quick notes |
 
-**Characteristics:**
-- Relaxed language
-- Contractions
-- Slang (appropriate)
-- Friendly tone
-
-**Examples:**
-```
-Input:  "Greetings, how are you?"
-Output: "Hey, what's up?"
-
-Input:  "I would like to discuss the matter"
-Output: "I wanna talk about the thing"
-
-Input:  "Thank you for your assistance"
-Output: "Thanks for your help!"
-```
+Every tone keeps URLs, email addresses, file paths, code, @mentions, #hashtags, IDs and
+version numbers exactly as you wrote them — a rewrite that would change one is discarded.
+The instructions live in one file, `opengrammar/extension/src/shared/prompts.json`.
 
 ---
 
-### 3. Professional 💼
+## How to use it
 
-**Use for:** Work emails, business communication, reports
+- **Part of your text:** select it → click the green **pen** that appears → pick a tone.
+- **The whole message:** when the field has nothing to fix, click the OGrammar **badge** in
+  the field's corner → pick a tone. (The same menu offers **Check the whole text with AI**
+  for a sentence-level review instead.)
+- **One sentence under review:** in the sentence-review card, open **Improve** → pick a tone.
 
-**Characteristics:**
-- Business appropriate
-- Clear and direct
-- Polite but efficient
-- Industry standard
-
-**Examples:**
-```
-Input:  "hey can we meet tmrw"
-Output: "Hello, could we schedule a meeting for tomorrow?"
-
-Input:  "i need this done fast"
-Output: "I would appreciate your prompt attention to this matter"
-
-Input:  "whats the status on that thing"
-Output: "Could you please provide an update on the project?"
-```
+Read the preview, then **Apply** or **Cancel** — pick another tone to re-preview. Ctrl+Z
+undoes an applied rewrite.
 
 ---
 
-### 4. Friendly 🤗
+## Troubleshooting
 
-**Use for:** Social interactions, customer service, team communication
-
-**Characteristics:**
-- Warm and welcoming
-- Positive language
-- Emotionally aware
-- Approachable
-
-**Examples:**
-```
-Input:  "send me the file"
-Output: "Could you please send me the file? Thanks!"
-
-Input:  "this is wrong"
-Output: "I think there might be a small issue here"
-
-Input:  "i need help"
-Output: "I could really use your help with this!"
-```
+- **"No change suggested"** — the text already reads well in that tone; try another one.
+- **"Rewrite failed — check provider/API key"** — open Options and test your provider.
+- **Slow** — a local model (Ollama) can take several seconds on first use; cloud providers
+  are faster.
+- **"Could not apply here"** — the text changed after the preview was made; pick the tone
+  again.
 
 ---
 
-### 5. Concise ⚡
+## Related
 
-**Use for:** Quick messages, summaries, bullet points
-
-**Characteristics:**
-- Brief and direct
-- No unnecessary words
-- Clear meaning
-- Efficient
-
-**Examples:**
-```
-Input:  "I was wondering if you might be able to help me with this"
-Output: "Can you help with this?"
-
-Input:  "In order to achieve our goals, we need to"
-Output: "To achieve our goals, we"
-
-Input:  "Due to the fact that it was raining"
-Output: "Because it was raining"
-```
-
----
-
-### 6. Detailed 📚
-
-**Use for:** Explanations, documentation, comprehensive guides
-
-**Characteristics:**
-- Thorough explanations
-- Complete information
-- Context provided
-- Elaborate
-
-**Examples:**
-```
-Input:  "Go to settings"
-Output: "Navigate to the settings menu by clicking on the gear icon in the top-right corner"
-
-Input:  "Click save"
-Output: "After making your changes, click the 'Save' button to store your preferences"
-
-Input:  "Restart the app"
-Output: "Close the application completely and then launch it again to apply the changes"
-```
-
----
-
-### 7. Persuasive 💪
-
-**Use for:** Sales copy, pitches, proposals, marketing
-
-**Characteristics:**
-- Compelling language
-- Benefit-focused
-- Call to action
-- Convincing
-
-**Examples:**
-```
-Input:  "Try our product"
-Output: "Experience the difference with our revolutionary solution"
-
-Input:  "This is good"
-Output: "This exceptional tool will transform your workflow"
-
-Input:  "Buy now"
-Output: "Start your journey to success today"
-```
-
----
-
-### 8. Neutral 😐
-
-**Use for:** General communication, factual content, balanced writing
-
-**Characteristics:**
-- Balanced tone
-- Unbiased language
-- Objective
-- Moderate
-
-**Examples:**
-```
-Input:  "This is absolutely the best thing ever!"
-Output: "This is a very good option"
-
-Input:  "This is terrible"
-Output: "This has some drawbacks"
-
-Input:  "You must do this"
-Output: "It is recommended to do this"
-```
-
----
-
-## 🚀 How to Use
-
-1. **Select text** in an editable field on any page.
-2. A small **rewrite bubble** appears near your selection — click it.
-3. **Choose a tone** and review the proposed rewrite.
-4. **Apply** to replace the text (or revert to the original if you change your mind).
-
-Tone rewriting requires an AI provider — set one in **Options** (see
-[07-ai-providers.md](07-ai-providers.md)).
-
----
-
-## 💡 Best Practices
-
-### ✅ Do's
-
-1. **Select Complete Thoughts**
-   - Full sentences work best
-   - Complete phrases
-   - Logical units
-
-2. **Review Before Applying**
-   - Check the rewritten text
-   - Ensure meaning is preserved
-   - Verify tone is appropriate
-
-3. **Try Multiple Tones**
-   - Compare different versions
-   - Find the best fit
-   - Learn from variations
-
-4. **Use Context-Appropriate Tones**
-   - Formal for work
-   - Casual for friends
-   - Professional for business
-
-### ❌ Don'ts
-
-1. **Don't Rewrite Single Words**
-   - Select phrases or sentences
-   - Words lack context
-   - Results may be odd
-
-2. **Don't Overuse**
-   - Keep your voice
-   - Don't lose authenticity
-   - Use as aid, not crutch
-
-3. **Don't Apply Blindly**
-   - Review changes
-   - Understand modifications
-   - Learn from suggestions
-
-4. **Don't Mix Inappropriate Tones**
-   - No casual in formal docs
-   - No formal in text messages
-   - Match the situation
-
----
-
-## 📊 Comparison Table
-
-| Original | Formal | Casual | Professional |
-|----------|--------|--------|--------------|
-| "hey" | "Greetings" | "Hey!" | "Hello" |
-| "wanna" | "would like to" | "wanna" | "would like to" |
-| "talk bout" | "discuss" | "chat about" | "discuss" |
-| "ASAP" | "at your earliest convenience" | "quick" | "promptly" |
-| "fix this" | "rectify this matter" | "fix this" | "address this issue" |
-
----
-
-## 🎯 Use Cases
-
-### Email Writing
-
-**Scenario:** Writing to a professor
-
-```
-Original: "hey i need help with the assignment"
-
-Formal: "Dear Professor, I would appreciate your assistance with the assignment"
-
-Professional: "Hello, I'm writing to request help with the assignment"
-```
-
-### Social Media
-
-**Scenario:** Posting about a product
-
-```
-Original: "This product is good"
-
-Friendly: "I absolutely love this product! 😊"
-
-Persuasive: "This amazing product will change your life!"
-
-Casual: "This product is pretty cool!"
-```
-
-### Business Communication
-
-**Scenario:** Requesting a meeting
-
-```
-Original: "can we meet tmrw"
-
-Professional: "Could we schedule a meeting for tomorrow?"
-
-Formal: "I would like to request a meeting at your earliest convenience tomorrow"
-
-Concise: "Meeting tomorrow?"
-```
-
-### Customer Service
-
-**Scenario:** Responding to complaint
-
-```
-Original: "we'll fix it"
-
-Friendly: "We'd be happy to fix this for you right away!"
-
-Professional: "We will resolve this issue promptly"
-
-Formal: "We shall rectify this matter at our earliest convenience"
-```
-
----
-
-## 🔧 Advanced Tips
-
-### 1. Combine Tones
-
-Some situations need mixed tones:
-- Professional + Friendly = Warm but business-appropriate
-- Formal + Concise = Direct but polite
-
-### 2. Iterative Refinement
-
-1. First pass: Get general tone
-2. Second pass: Refine specific parts
-3. Third pass: Polish final version
-
-### 3. Learn Patterns
-
-Notice how tones change:
-- Word choices
-- Sentence structure
-- Level of detail
-- Formality markers
-
-### 4. Save Favorites
-
-Keep a list of good rewrites:
-- Common phrases you use
-- Email templates
-- Standard responses
-
----
-
-## 🆘 Troubleshooting
-
-### Problem: Rewrites Are Too Different
-
-**Solution:**
-- Try "Neutral" tone first
-- Use shorter text selections
-- Review and edit manually
-
-### Problem: Meaning Is Lost
-
-**Solution:**
-- Provide more context
-- Use complete sentences
-- Try different tone
-
-### Problem: Tone Not Appropriate
-
-**Solution:**
-- Choose different tone
-- Combine tones manually
-- Edit the result
-
-### Problem: Slow Response
-
-**Solution:**
-- Check internet connection
-- Verify API key is valid
-- Try smaller text selection
-
----
-
-## 📚 Related Documentation
-
-- [Using OGrammar](09-using-opengrammar.md) - Complete user guide
-- [AI Providers](07-ai-providers.md) - Configure AI
-
----
-
-**Happy Rewriting! ✨**
-
-Master tone rewriting to communicate more effectively in any situation!
+- [Using OGrammar](09-using-opengrammar.md)
+- [AI Providers](07-ai-providers.md)

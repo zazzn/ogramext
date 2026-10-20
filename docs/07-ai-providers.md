@@ -36,12 +36,14 @@ has **not** been scored on our corpus — see the table below.
   no key and no network. This is the inline tier.
 - **The LLM tier (optional)** runs on the *proactive* correction path — it reviews whole
   sentences for context errors the rules miss, and powers **tone rewriting** (Polish /
-  Formalize / Casual). It is a deferred/background tier, never inline, because even the
+  Formal / Casual). It is a deferred/background tier, never inline, because even the
   fastest cloud call (~400 ms) is far slower than the local engine (~5 ms).
-- **Protected-text masking** is on by default: before any sentence is sent to a provider,
-  OGrammar replaces URLs, emails, file paths, code, IDs, versions, and command snippets
-  with placeholders, then restores them in the result. This makes *every* provider safer
-  and is the real guarantee — not the model's own restraint.
+- **Protected text** (URLs, emails, file paths, code, IDs, versions, @handles) is guarded on
+  every AI call: the model is told exactly which fragments to leave alone, and any
+  correction or tone rewrite that changes one is **discarded** — that check, not the model's
+  own restraint, is the guarantee. Full **masking** (sending placeholders instead of the
+  fragments) is an opt-in in Options; it's off by default because it strips context the
+  model needs on jargon-heavy text.
 
 ---
 
