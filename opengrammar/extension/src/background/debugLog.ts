@@ -81,7 +81,8 @@ async function getEntries(): Promise<DebugEntry[]> {
  */
 export async function formatCompact(): Promise<{ text: string; count: number }> {
   const entries = await getEntries();
-  const v = chrome.runtime.getManifest().version;
+  const { version, version_name } = chrome.runtime.getManifest();
+  const v = version_name || version;
   const lines: string[] = [
     `# OGrammar debug log v${v} — ${entries.length} event(s)`,
     `# generated ${new Date().toISOString()}`,

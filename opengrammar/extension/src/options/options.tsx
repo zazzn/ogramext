@@ -78,7 +78,10 @@ async function initialize() {
   renderIgnoredIssues();
   await loadAnalytics();
 
-  if (elements.version) elements.version.textContent = chrome.runtime.getManifest().version;
+  if (elements.version) {
+    const { version, version_name } = chrome.runtime.getManifest();
+    elements.version.textContent = version_name || version; // "0.10.0 (build 17562c3)"
+  }
 
   console.log('OGrammar options page initialized');
 }
