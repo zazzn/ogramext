@@ -84,6 +84,23 @@ function matchCase(original: string, cand: string): string {
 export async function spellSuggestions(word: string): Promise<string[]> {
   const freq = await loadFreq();
   if (!freq) return [];
+  // Every check re-lints the whole field, so the same flagged words (names,
+  // jargon) come back each time; the edit-2 fallback builds ~10^5 strings per
+  // word. The result depends only on the exact word and the static dictionary.
+  const cached = suggestCache.get(word);
+  if (cached) return cached.slice();
+  const result = computeSuggestions(freq, word);
+  suggestCache.set(word, result);
+  if (suggestCache.size > SUGGEST_CACHE_MAX) {
+    suggestCache.delete(suggestCache.keys().next().value as string);
+  }
+  return result.slice();
+}
+
+const SUGGEST_CACHE_MAX = 1000; // insertion-ordered; oldest entry evicted first
+const suggestCache = new Map<string, string[]>();
+
+function computeSuggestions(freq: Map<string, number>, word: string): string[] {
   const w = word.toLowerCase();
   if (freq.has(w)) return [];
 

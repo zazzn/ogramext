@@ -37,6 +37,7 @@ let currentSpellMenu: HTMLElement | null = null;
 // Cache LLM whole-text corrections by (quote-stripped) source text so
 // reopening / navigating the review panel doesn't refetch.
 const correctionCache = new Map<string, string>();
+const CORRECTION_CACHE_MAX = 32; // insertion-ordered; oldest entry evicted first
 
 const BUBBLE_SIZE = 30; // px — small, fits inside the field corner
 const COMPACT_BUBBLE_SIZE = 24;
@@ -132,6 +133,11 @@ let pendingDecorationUpdate: DecorationUpdateKind | null = null;
 let decorationResizeObserver: ResizeObserver | null = null;
 let decorationIntersectionObserver: IntersectionObserver | null = null;
 let decorationPollInterval: number | null = null;
+// Contenteditable only: set by a MutationObserver when the field's DOM changes, so
+// the scroll/poll reposition path can skip reading innerText (a full-field layout
+// read) while nothing changed. Dirty just means "do the exact text comparison".
+let decorationMutationObserver: MutationObserver | null = null;
+let underlineTextDirty = true;
 let observedDecorationTarget: HTMLElement | null = null;
 let observedTargetIntersects = true;
 let fontReadyToken = 0;
@@ -333,6 +339,7 @@ function cacheUnderlineBase(element: HTMLElement) {
     height: rect.height,
   };
   underlineBaseText = getFieldTextSnapshot(element);
+  underlineTextDirty = false;
   underlineBaseScrollLeft = scroll.left;
   underlineBaseScrollTop = scroll.top;
   underlinesAreVisible = true;
@@ -455,6 +462,9 @@ function renderOverlayUnderlines(element: HTMLElement, issues: Issue[]) {
   overlayIssues = issues;
   if (!highlightContainer) return;
   const map = buildTextMap(element);
+  // Measure everything first, then append: interleaving getClientRects /
+  // getComputedStyle with appendChild forces a synchronous layout per issue.
+  const pending: PendingUnderline[] = [];
   for (const issue of issues) {
     if (issue.ignored) continue;
     const span = resolveSpan(map, issue.offset, issue.length, issue.original);
@@ -469,11 +479,19 @@ function renderOverlayUnderlines(element: HTMLElement, issues: Issue[]) {
     const st = getUnderlineStyle(issue);
     for (const r of Array.from(range.getClientRects())) {
       if (r.width === 0 || r.height === 0) continue;
-      appendUnderline(r, fs, st, issue, element);
+      pending.push({ r, fs, st, issue });
     }
   }
   cacheUnderlineBase(element);
+  for (const p of pending) appendUnderline(p.r, p.fs, p.st, p.issue, element);
 }
+
+type PendingUnderline = {
+  r: RectLike;
+  fs: number;
+  st: { line: string; dashed: boolean };
+  issue: Issue;
+};
 
 /**
  * Input/textarea: measure issue rects with a HIDDEN style-cloned mirror
@@ -526,6 +544,7 @@ function renderInputUnderlines(element: HTMLElement, issues: Issue[]) {
   const len = (tnode.textContent || '').length;
   const fs = parseFloat(getComputedStyle(input).fontSize) || 16;
   const clip = input.getBoundingClientRect();
+  const pending: PendingUnderline[] = []; // measure all, then append (see above)
   for (const issue of issues) {
     if (issue.ignored) continue;
     const span = resolveInString(input.value, issue.offset, issue.length, issue.original);
@@ -543,10 +562,11 @@ function renderInputUnderlines(element: HTMLElement, issues: Issue[]) {
       if (r.bottom < clip.top || r.top > clip.bottom || r.right < clip.left || r.left > clip.right) {
         continue; // scrolled out of the field
       }
-      appendUnderline(r, fs, st, issue, element);
+      pending.push({ r, fs, st, issue });
     }
   }
   cacheUnderlineBase(element);
+  for (const p of pending) appendUnderline(p.r, p.fs, p.st, p.issue, element);
 }
 
 /** Replace one whole sentence span with the LLM-corrected text — same
@@ -611,7 +631,7 @@ function repositionActiveUnderlines(): boolean {
 
   // If the text or textarea scroll changed, cached rects no longer describe the
   // glyphs. Rebuild instead of translating stale hit targets.
-  if (getFieldTextSnapshot(overlayTarget) !== underlineBaseText) return false;
+  if (fieldTextChangedSinceBase(overlayTarget)) return false;
   const scroll = getScrollSnapshot(overlayTarget);
   if (scroll.left !== underlineBaseScrollLeft || scroll.top !== underlineBaseScrollTop) return false;
 
@@ -633,6 +653,15 @@ function repositionActiveUnderlines(): boolean {
   }
   setUnderlinesVisible(true);
   return true;
+}
+
+function fieldTextChangedSinceBase(element: HTMLElement): boolean {
+  const mutationTracked =
+    decorationMutationObserver !== null && observedDecorationTarget === element;
+  if (mutationTracked && !underlineTextDirty) return false;
+  const changed = getFieldTextSnapshot(element) !== underlineBaseText;
+  if (!changed && mutationTracked) underlineTextDirty = false;
+  return changed;
 }
 
 function scheduleFloatingDecorationUpdate(kind: DecorationUpdateKind) {
@@ -689,6 +718,22 @@ export function startFloatingDecorationObservers(element: HTMLElement) {
     decorationIntersectionObserver.observe(element);
   }
 
+  if (
+    element.tagName !== 'INPUT' &&
+    element.tagName !== 'TEXTAREA' &&
+    typeof MutationObserver !== 'undefined'
+  ) {
+    underlineTextDirty = true;
+    decorationMutationObserver = new MutationObserver(() => {
+      underlineTextDirty = true;
+    });
+    decorationMutationObserver.observe(element, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+  }
+
   decorationPollInterval = window.setInterval(() => {
     if (observedDecorationTarget?.isConnected) scheduleFloatingDecorationUpdate('reposition');
   }, 1000);
@@ -710,6 +755,8 @@ export function stopFloatingDecorationObservers(element?: HTMLElement) {
   decorationResizeObserver = null;
   decorationIntersectionObserver?.disconnect();
   decorationIntersectionObserver = null;
+  decorationMutationObserver?.disconnect();
+  decorationMutationObserver = null;
   if (decorationPollInterval !== null) {
     window.clearInterval(decorationPollInterval);
     decorationPollInterval = null;
@@ -2348,7 +2395,12 @@ function showSentenceReview(
       }
       const corrected = (resp && resp.corrected) || text;
       const llm = !!(resp && resp.llm);
-      if (llm && corrected.trim() !== text.trim()) correctionCache.set(text, corrected);
+      if (llm && corrected.trim() !== text.trim()) {
+        correctionCache.set(text, corrected);
+        if (correctionCache.size > CORRECTION_CACHE_MAX) {
+          correctionCache.delete(correctionCache.keys().next().value as string);
+        }
+      }
       const shown = proceed(corrected, llm);
       if (!shown && resp?.error) {
         showReviewStatusCard(

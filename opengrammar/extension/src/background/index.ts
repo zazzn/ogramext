@@ -53,6 +53,9 @@ const DEFAULT_ANALYTICS: AnalyticsSummary = {
 chrome.runtime.onInstalled.addListener(() => {
   void initializeStoredDefaults();
   void warmHarper();
+  // Older versions kept the last field's text in storage.local; it now lives in
+  // storage.session (see editorContextArea), so drop the stale on-disk copy.
+  if (chrome.storage.session) void chrome.storage.local.remove('lastEditorContext');
 });
 
 // Warm the local engine when the SW spins back up so the first keystroke
@@ -140,9 +143,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.type === 'CLEAR_ANALYTICS') {
-    void chrome.storage.sync.set({ analyticsSummary: DEFAULT_ANALYTICS }).then(() => {
-      sendResponse({ success: true });
-    });
+    // Queued behind any in-flight flush, so a batch it already took can't
+    // re-add the old totals after the clear.
+    analyticsFlushChain = analyticsFlushChain
+      .then(() => {
+        pendingAnalytics = [];
+        return chrome.storage.sync.set({ analyticsSummary: DEFAULT_ANALYTICS });
+      })
+      .catch((e) => console.debug('[analytics] clear failed:', e));
+    void analyticsFlushChain.then(() => sendResponse({ success: true }));
     return true;
   }
 
@@ -946,15 +955,27 @@ async function storeActiveContext(
     capturedAt: Date.now(),
   };
 
-  await chrome.storage.local.set({ lastEditorContext: payload });
+  await editorContextArea().set({ lastEditorContext: payload });
+}
+
+/** Where the popup's "active text" lives. storage.session is in-memory and not
+ *  exposed to content scripts, unlike storage.local, where each sync was a disk
+ *  write fanned out to every tab's storage.onChanged listener. */
+function editorContextArea(): chrome.storage.StorageArea {
+  return chrome.storage.session ?? chrome.storage.local;
 }
 
 async function getActiveEditorContext(): Promise<EditorContext | null> {
-  const result = await chrome.storage.local.get('lastEditorContext');
+  const result = await editorContextArea().get('lastEditorContext');
   return (result.lastEditorContext as EditorContext | undefined) || null;
 }
 
 async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
+  await flushAnalytics();
+  return readAnalyticsSummary();
+}
+
+async function readAnalyticsSummary(): Promise<AnalyticsSummary> {
   const result = await chrome.storage.sync.get('analyticsSummary');
   return {
     ...DEFAULT_ANALYTICS,
@@ -972,24 +993,58 @@ async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
   };
 }
 
+// Analytics are batched. Every grammar check used to run one or two
+// read-modify-write cycles on chrome.storage.sync, which is quota-limited
+// (120 writes/min, 1800/hour): steady typing used the quota up, and then
+// unrelated sync writes (settings, dictionary, ignores) failed. Overlapping
+// cycles also lost counts. Reads (getAnalyticsSummary) flush first.
+interface AnalyticsDelta {
+  eventType: AnalyticsEventType;
+  count: number;
+  domain?: string;
+  provider?: string;
+}
+const ANALYTICS_FLUSH_MS = 5000;
+let pendingAnalytics: AnalyticsDelta[] = [];
+let analyticsFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let analyticsFlushChain: Promise<void> = Promise.resolve();
+
 async function trackAnalyticsEvent(
   eventType: AnalyticsEventType,
   payload?: { count?: number; domain?: string; provider?: string },
 ): Promise<void> {
-  const summary = await getAnalyticsSummary();
-  const count = payload?.count || 1;
-  summary.totals[eventType] = (summary.totals[eventType] || 0) + count;
-
-  if (payload?.domain) {
-    summary.domains[payload.domain] = (summary.domains[payload.domain] || 0) + count;
+  pendingAnalytics.push({
+    eventType,
+    count: payload?.count || 1,
+    domain: payload?.domain,
+    provider: payload?.provider,
+  });
+  if (!analyticsFlushTimer) {
+    analyticsFlushTimer = setTimeout(() => void flushAnalytics(), ANALYTICS_FLUSH_MS);
   }
+}
 
-  if (payload?.provider) {
-    summary.providers[payload.provider] = (summary.providers[payload.provider] || 0) + count;
+function flushAnalytics(): Promise<void> {
+  if (analyticsFlushTimer) {
+    clearTimeout(analyticsFlushTimer);
+    analyticsFlushTimer = null;
   }
-
-  summary.lastUpdatedAt = Date.now();
-  await chrome.storage.sync.set({ analyticsSummary: summary });
+  analyticsFlushChain = analyticsFlushChain
+    .then(async () => {
+      if (pendingAnalytics.length === 0) return;
+      const batch = pendingAnalytics;
+      pendingAnalytics = [];
+      const summary = await readAnalyticsSummary();
+      for (const { eventType, count, domain, provider } of batch) {
+        summary.totals[eventType] = (summary.totals[eventType] || 0) + count;
+        if (domain) summary.domains[domain] = (summary.domains[domain] || 0) + count;
+        if (provider) summary.providers[provider] = (summary.providers[provider] || 0) + count;
+      }
+      summary.lastUpdatedAt = Date.now();
+      await chrome.storage.sync.set({ analyticsSummary: summary });
+    })
+    .catch((e) => console.debug('[analytics] flush failed:', e));
+  return analyticsFlushChain;
 }
 
 // ─── D1: Badge ───────────────────────────────────────────────────────────────
@@ -1022,17 +1077,72 @@ interface WritingSessionEntry {
   topErrors: Record<string, number>;
 }
 
-async function saveWritingSession(payload: {
+interface WritingSessionPayload {
   wordsChecked: number;
   issuesFound: number;
   issuesFixed: number;
   writingScore: number;
   errorTypes?: Record<string, number>;
-}): Promise<void> {
-  const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-  const result = await chrome.storage.local.get('writingHistory');
-  const history: Record<string, WritingSessionEntry> = result.writingHistory || {};
+}
 
+// Batched like analytics: each check used to rewrite the whole 90-day history in
+// storage.local (fanned out to every tab's storage.onChanged), and overlapping
+// read-modify-writes lost sessions. Queued payloads are applied in order, so the
+// totals and rolling score come out the same. getWritingHistory flushes first.
+const SESSION_FLUSH_MS = 5000;
+let pendingSessions: Array<{ day: string; payload: WritingSessionPayload }> = [];
+let sessionFlushTimer: ReturnType<typeof setTimeout> | null = null;
+let sessionFlushChain: Promise<void> = Promise.resolve();
+
+// Analytics and sessions batch in worker memory for up to 5 s. An idle worker
+// shuts down well after that, but an extension reload/update or browser exit
+// can drop the last few seconds of counts. Flush on suspend where Chrome fires
+// it; that small loss is otherwise accepted.
+chrome.runtime.onSuspend?.addListener(() => {
+  void flushAnalytics();
+  void flushWritingSessions();
+});
+
+async function saveWritingSession(payload: WritingSessionPayload): Promise<void> {
+  pendingSessions.push({ day: new Date().toISOString().slice(0, 10), payload });
+  if (!sessionFlushTimer) {
+    sessionFlushTimer = setTimeout(() => void flushWritingSessions(), SESSION_FLUSH_MS);
+  }
+}
+
+function flushWritingSessions(): Promise<void> {
+  if (sessionFlushTimer) {
+    clearTimeout(sessionFlushTimer);
+    sessionFlushTimer = null;
+  }
+  sessionFlushChain = sessionFlushChain
+    .then(async () => {
+      if (pendingSessions.length === 0) return;
+      const batch = pendingSessions;
+      pendingSessions = [];
+      const result = await chrome.storage.local.get('writingHistory');
+      const history: Record<string, WritingSessionEntry> = result.writingHistory || {};
+      for (const { day, payload } of batch) applyWritingSession(history, day, payload);
+
+      // Keep only last 90 days
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 90);
+      const cutoffStr = cutoff.toISOString().slice(0, 10);
+      for (const key of Object.keys(history)) {
+        if (key < cutoffStr) delete history[key];
+      }
+
+      await chrome.storage.local.set({ writingHistory: history });
+    })
+    .catch((e) => console.debug('[history] flush failed:', e));
+  return sessionFlushChain;
+}
+
+function applyWritingSession(
+  history: Record<string, WritingSessionEntry>,
+  today: string, // YYYY-MM-DD
+  payload: WritingSessionPayload,
+): void {
   const existing = history[today] || {
     date: today,
     wordsChecked: 0,
@@ -1062,19 +1172,10 @@ async function saveWritingSession(payload: {
   }
 
   history[today] = existing;
-
-  // Keep only last 90 days
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 90);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-  for (const key of Object.keys(history)) {
-    if (key < cutoffStr) delete history[key];
-  }
-
-  await chrome.storage.local.set({ writingHistory: history });
 }
 
 async function getWritingHistory(days: number = 30): Promise<WritingSessionEntry[]> {
+  await flushWritingSessions();
   const result = await chrome.storage.local.get('writingHistory');
   const history: Record<string, WritingSessionEntry> = result.writingHistory || {};
 

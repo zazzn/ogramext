@@ -40,14 +40,16 @@ const BLOCK_DISPLAYS = new Set([
   'flow-root',
 ]);
 
-function isHidden(el: Element): boolean {
+/** Hidden + block-ness from ONE getComputedStyle call. This walk runs on every
+ *  extraction (each check and caret lookup), so one style read per element instead
+ *  of two matters on large contenteditables. */
+function styleInfo(el: Element): { hidden: boolean; block: boolean } {
   const s = window.getComputedStyle(el);
-  return s.display === 'none' || s.visibility === 'hidden';
-}
-
-function isBlock(el: Element): boolean {
-  const d = window.getComputedStyle(el).display;
-  return BLOCK_DISPLAYS.has(d) || /^table/.test(d);
+  const d = s.display;
+  return {
+    hidden: d === 'none' || s.visibility === 'hidden',
+    block: BLOCK_DISPLAYS.has(d) || d.startsWith('table'),
+  };
 }
 
 /**
@@ -74,13 +76,14 @@ export function buildTextMap(root: HTMLElement): TextMap {
         text += raw;
       } else if (child.nodeType === Node.ELEMENT_NODE) {
         const el = child as HTMLElement;
-        if (isHidden(el)) continue;
+        const info = styleInfo(el);
+        if (info.hidden) continue;
         if (el.tagName === 'BR') {
           segments.push({ textStart: text.length, textEnd: text.length + 1, node: null });
           text += '\n';
           continue;
         }
-        const block = isBlock(el);
+        const block = info.block;
         if (block) pushSep();
         walk(el);
         if (block) pushSep();

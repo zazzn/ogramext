@@ -52,7 +52,18 @@ async function resolveDialect(): Promise<Dialect> {
  */
 export function invalidateHarperLinter(): void {
   linterPromise = null;
+  lintCache.clear();
+  lintGeneration++;
 }
+
+// Recent results by exact text. The same text is often linted again unchanged
+// (refocusing a field, the input + MutationObserver paths, several frames), and a
+// lint blocks the service worker that every tab shares. Output depends only on the
+// text, the dialect (cleared above) and static models.
+const LINT_CACHE_MAX = 8;
+const LINT_CACHE_MAX_CHARS = 100_000;
+const lintCache = new Map<string, Issue[]>();
+let lintGeneration = 0;
 
 // Harper lint config overrides. The word/phrase-level style opt-ins give the
 // Grammarly-style "consider rewriting" grey tier for free; the whole-sentence
@@ -197,6 +208,24 @@ function mapType(kind: string): Issue['type'] {
  */
 export async function harperLint(text: string): Promise<Issue[]> {
   if (!text || !text.trim()) return [];
+  const hit = lintCache.get(text);
+  if (hit) {
+    lintCache.delete(text); // refresh recency
+    lintCache.set(text, hit);
+    return hit.map((i) => ({ ...i }));
+  }
+  const gen = lintGeneration;
+  const issues = await harperLintUncached(text);
+  if (gen === lintGeneration && text.length <= LINT_CACHE_MAX_CHARS) {
+    lintCache.set(text, issues.map((i) => ({ ...i })));
+    if (lintCache.size > LINT_CACHE_MAX) {
+      lintCache.delete(lintCache.keys().next().value as string);
+    }
+  }
+  return issues;
+}
+
+async function harperLintUncached(text: string): Promise<Issue[]> {
 
   const linter = await getLinter();
   const lints: Lint[] = await linter.lint(text, { language: 'plaintext' });

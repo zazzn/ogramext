@@ -7,6 +7,21 @@ Options → About.
 
 Bump the middle number for new features, the last number for fixes only.
 
+## [0.10.1] - 2026-11-25
+
+Performance and stability fixes.
+
+- Smoother typing on heavy pages (Gmail, Facebook, forums): text is no longer extracted
+  and sent to the background on every keystroke, checks no longer read the whole page,
+  and underlines are measured and drawn in one batch instead of re-laying out the page
+  for each one.
+- Scrolling with underlines no longer re-reads the whole text box every frame.
+- Fixed a slow memory build-up: text boxes that a site removes (closed drafts, SPA
+  navigation) are now cleaned up.
+- Analytics and writing history are saved in batches. Saving on every check could use
+  up Chrome's sync-storage write limit, after which settings and dictionary saves failed.
+- Repeat checks of unchanged text and repeat spelling lookups are cached.
+
 ## [0.10.0] - 2026-10-21
 
 - **Rephrase** now rewrites the whole sentence around the issue. It used to send only the

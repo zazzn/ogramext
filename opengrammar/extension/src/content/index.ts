@@ -404,6 +404,7 @@ let lateMountObserver: MutationObserver | null = null;
  */
 function reprobeActiveElement() {
   if (!checkContext() || isDomainDisabled()) return;
+  pruneDetachedElements();
   const el = deepActiveElement();
   if (el && isEditable(el) && !activeElements.has(el)) {
     console.log('[OGrammar] Late-mounted editable detected:', el.tagName);
@@ -536,6 +537,7 @@ function activateElement(element: HTMLElement) {
     return; // Already active
   }
 
+  pruneDetachedElements();
   currentFocusElement = element;
 
   const editableElement: EditableElement = {
@@ -589,9 +591,22 @@ function activateElement(element: HTMLElement) {
 }
 
 /**
+ * Deactivate fields that were removed from the DOM without a focusout (SPA view
+ * swaps: Gmail/Facebook/YouTube replace the composer). Otherwise the map keeps
+ * their observers, listeners and whole detached subtrees alive for the tab's life.
+ */
+function pruneDetachedElements() {
+  activeElements.forEach((_, el) => {
+    // The page overlay belongs to the current field; pruning another (e.g. a
+    // composer left open behind a review panel) must not wipe its underlines.
+    if (!el.isConnected) deactivateElement(el, el === currentFocusElement);
+  });
+}
+
+/**
  * Deactivate an editable element
  */
-function deactivateElement(element: HTMLElement) {
+function deactivateElement(element: HTMLElement, clearUI = true) {
   const editableElement = activeElements.get(element);
   if (!editableElement) return;
 
@@ -617,7 +632,7 @@ function deactivateElement(element: HTMLElement) {
     currentActive &&
     (currentActive.closest('.opengrammar-tooltip') || currentActive.closest('.opengrammar-badge'));
 
-  if (!isInteractingWithUI && !isUIActive()) {
+  if (clearUI && !isInteractingWithUI && !isUIActive()) {
     clearHighlights();
   }
 
@@ -636,10 +651,10 @@ function deactivateElement(element: HTMLElement) {
 function handleInput(event: Event) {
   const target = getElementFromTarget(event.target);
   if (target && activeElements.has(target)) {
-    const editableElement = activeElements.get(target)!;
-    editableElement.lastText = extractText(target);
-    void syncActiveContext(editableElement.lastText, editableElement.lastIssues || []);
     if (autocorrectEnabled) noteAutocorrectEdit();
+    // Extracting the full text (a DOM walk on contenteditables) and syncing it to
+    // the background (a storage write) once per pause, not on every keystroke.
+    debouncedRefreshLastText(target);
     debouncedCheck(target);
   }
 }
@@ -1069,7 +1084,7 @@ const checkGrammar = async (element: HTMLElement) => {
     const response = await chrome.runtime.sendMessage({
       type: 'CHECK_GRAMMAR',
       text,
-      context: buildAnalysisContext(element, text),
+      context: buildAnalysisContext(element),
     });
 
     if (response?.error) {
@@ -1115,6 +1130,16 @@ function resetAssistantAfterError(element: HTMLElement) {
 }
 
 const debouncedCheck = debounce(checkGrammar, 800);
+
+// Must stay shorter than the contenteditable MutationObserver debounce (500 ms) so
+// lastText is already current when that observer compares, and it doesn't queue a
+// second check for an edit the input event already scheduled.
+const debouncedRefreshLastText = debounce((element: HTMLElement) => {
+  const editableElement = activeElements.get(element);
+  if (!editableElement) return;
+  editableElement.lastText = extractText(element);
+  void syncActiveContext(editableElement.lastText, editableElement.lastIssues || []);
+}, 250);
 
 /**
  * Check if an element is editable
@@ -1182,48 +1207,14 @@ function normalizeEditableTarget(target: HTMLElement | null): HTMLElement | null
   return target;
 }
 
-function buildAnalysisContext(element: HTMLElement, text: string): AnalysisContext {
-  const cursor = getCaretPosition(element);
-  const previousText = text.slice(Math.max(0, cursor - 220), cursor).trim();
-  const nextText = text.slice(cursor, Math.min(text.length, cursor + 220)).trim();
-  const activeSentence = text
-    .slice(
-      Math.max(0, text.lastIndexOf('.', cursor - 1) + 1),
-      Math.min(
-        text.length,
-        (() => {
-          const nextPeriod = text.indexOf('.', cursor);
-          return nextPeriod === -1 ? text.length : nextPeriod + 1;
-        })(),
-      ),
-    )
-    .trim();
-
-  return {
-    domain: window.location.hostname,
-    editorType: getEditorType(element),
-    activeSentence,
-    previousText,
-    nextText,
-    fullTextExcerpt: text.slice(0, 1500),
-    pageContext: getPageContext(),
-  };
-}
-
 /**
- * Title + URL + the page's main visible text (capped), so the grammar/AI
- * review can ground its suggestions in what the user is actually reading.
- * Included in the AnalysisContext sent to the configured LLM provider.
+ * Context for CHECK_GRAMMAR. The background only reads `domain` (analytics); the
+ * local Harper tier uses none of it, and the LLM paths send their own text. So we
+ * no longer compute the caret (a second full DOM walk) or scrape the page's
+ * `innerText` (a forced whole-page layout on Gmail/Facebook) on every check.
  */
-function getPageContext(): string {
-  try {
-    const main = (document.querySelector('main, article, [role="main"]') ||
-      document.body) as HTMLElement | null;
-    const body = (main?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 1500);
-    return `Title: ${document.title}\nURL: ${location.href}\nPage: ${body}`;
-  } catch {
-    return '';
-  }
+function buildAnalysisContext(element: HTMLElement): AnalysisContext {
+  return { domain: window.location.hostname, editorType: getEditorType(element) };
 }
 
 function getEditorType(element: HTMLElement): string {
