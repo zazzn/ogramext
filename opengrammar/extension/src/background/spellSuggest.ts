@@ -10,7 +10,7 @@
 // set; SymSpell only wins on raw lookup speed via a large precomputed index that
 // needs IndexedDB persistence in an MV3 service worker. OGrammar only queries
 // the handful of words Harper already flagged per check, so per-word edit
-// generation (ED1, falling back to ED2) is fast enough and avoids that
+// generation (ED1 + ED2) is fast enough and avoids that
 // complexity. The accuracy comes from the dictionary + context ranking, not the
 // algorithm. Benchmarked Harper 75% → this 95% top-1 on a common-typo set.
 //
@@ -74,18 +74,18 @@ function matchCase(original: string, cand: string): string {
 }
 
 /**
- * Frequency-ranked candidate pool for a single (already Harper-flagged) word:
- * edit-distance-1 dictionary matches, or edit-distance-2 if there are none.
+ * Candidate pool for a single (already Harper-flagged) word: edit-distance-1
+ * dictionary matches, then edit-distance-2 ones (see computeSuggestions).
  * Returns [] when the dictionary is unavailable or the word is itself in the
  * dictionary (caller falls back to Harper's own candidates). Best-first by
- * corpus frequency, case-matched to the original; the n-gram context re-ranker
- * makes the final call.
+ * edit distance then corpus frequency, case-matched to the original; the
+ * n-gram context re-ranker makes the final call.
  */
 export async function spellSuggestions(word: string): Promise<string[]> {
   const freq = await loadFreq();
   if (!freq) return [];
   // Every check re-lints the whole field, so the same flagged words (names,
-  // jargon) come back each time; the edit-2 fallback builds ~10^5 strings per
+  // jargon) come back each time; the edit-2 pass builds ~10^5 strings per
   // word. The result depends only on the exact word and the static dictionary.
   const cached = suggestCache.get(word);
   if (cached) return cached.slice();
@@ -100,23 +100,33 @@ export async function spellSuggestions(word: string): Promise<string[]> {
 const SUGGEST_CACHE_MAX = 1000; // insertion-ordered; oldest entry evicted first
 const suggestCache = new Map<string, string[]>();
 
+/** Candidate pool handed to the context ranker (edit-1 words first, then edit-2). */
+const MAX_SUGGESTIONS = 40;
+
+// Every dictionary word within edit distance 2: edit-1 words first (by
+// frequency), then edit-2 words (by frequency), cut to MAX_SUGGESTIONS. Edit-2
+// words are generated even when edit-1 words exist — the intended word is often
+// a rarer edit-2 word — and the context ranker's distance-aware channel score
+// makes the final call.
 function computeSuggestions(freq: Map<string, number>, word: string): string[] {
   const w = word.toLowerCase();
   if (freq.has(w)) return [];
 
-  const rank = (set: Set<string>): string[] => {
-    set.delete(w);
-    return [...set]
-      .sort((a, b) => (freq.get(b) || 0) - (freq.get(a) || 0))
-      .slice(0, 12)
-      .map((c) => matchCase(word, c));
-  };
+  const byFreq = (a: string, b: string) =>
+    (freq.get(b) || 0) - (freq.get(a) || 0) || (a < b ? -1 : a > b ? 1 : 0);
 
-  const e1 = new Set<string>();
-  for (const e of edits1(w)) if (freq.has(e)) e1.add(e);
-  if (e1.size > 0) return rank(e1);
+  const first = edits1(w);
+  const e1: string[] = [];
+  for (const e of first) if (e !== w && freq.has(e)) e1.push(e);
 
   const e2 = new Set<string>();
-  for (const e of edits1(w)) for (const x of edits1(e)) if (freq.has(x)) e2.add(x);
-  return rank(e2);
+  for (const e of first) {
+    for (const x of edits1(e)) {
+      if (x !== w && !first.has(x) && freq.has(x)) e2.add(x);
+    }
+  }
+
+  return [...e1.sort(byFreq), ...[...e2].sort(byFreq)]
+    .slice(0, MAX_SUGGESTIONS)
+    .map((c) => matchCase(word, c));
 }

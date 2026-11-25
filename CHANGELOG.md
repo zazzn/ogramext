@@ -7,6 +7,11 @@ Options → About.
 
 Bump the middle number for new features, the last number for fixes only.
 
+## [0.10.2] - 2026-11-25
+
+- The offline spell checker picks the right word first more often (about 67% to 74% on
+  our test set), using the surrounding words to break ties.
+
 ## [0.10.1] - 2026-11-25
 
 Performance and stability fixes.

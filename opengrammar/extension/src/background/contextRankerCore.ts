@@ -215,6 +215,49 @@ export function rankCandidates(
   return out;
 }
 
+// ── spell-pool channel (rankSpellCandidates) ──
+// Tuned on 1,500 real typos in real sentences (scripts/tune-spell-rank.mjs):
+// score = context − SPELL_W · typoCost, where typoCost is an edit distance in
+// which a swap of two adjacent letters is ONE edit and the commonest slips cost
+// half an edit. Right-first 66.7% → 74.1% with the 40-word ED1+ED2 pool.
+// Keyboard-neighbour and first-letter costs were measured too and gave no
+// reliable held-out gain, so they are left out. Mirrors context.rs exactly.
+export const SPELL_W = 5; // nats per edit
+export const SLIP_COST = 0.5; // transposition, vowel↔vowel, dropped/extra double letter
+const VOWELS = 'aeiouy';
+
+/**
+ * Weighted restricted-Damerau (OSA) distance from the typo `a` to the
+ * candidate `b`, both lowercase. Cheap edits (SLIP_COST): adjacent
+ * transposition; substituting one vowel for another; deleting a letter the
+ * typo doubled (untill→until); inserting a letter the word doubles
+ * (ocasion→occasion). Everything else costs 1.
+ */
+export function typoCost(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  const del = (i: number) => // drop a[i-1]
+    (i > 1 && a[i - 1] === a[i - 2]) || (i < m && a[i - 1] === a[i]) ? SLIP_COST : 1;
+  const ins = (j: number) => // add b[j-1]
+    (j > 1 && b[j - 1] === b[j - 2]) || (j < n && b[j - 1] === b[j]) ? SLIP_COST : 1;
+  const sub = (x: string, y: string) =>
+    x === y ? 0 : VOWELS.includes(x) && VOWELS.includes(y) ? SLIP_COST : 1;
+  const d: number[][] = [];
+  for (let i = 0; i <= m; i++) d.push(new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++) d[i][0] = d[i - 1][0] + del(i);
+  for (let j = 1; j <= n; j++) d[0][j] = d[0][j - 1] + ins(j);
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      let v = Math.min(d[i - 1][j] + del(i), d[i][j - 1] + ins(j), d[i - 1][j - 1] + sub(a[i - 1], b[j - 1]));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1] && a[i - 1] !== a[i - 2]) {
+        v = Math.min(v, d[i - 2][j - 2] + SLIP_COST);
+      }
+      d[i][j] = v;
+    }
+  }
+  return d[m][n];
+}
+
 /**
  * Rank an arbitrary candidate pool (e.g. from a Hunspell/SymSpell suggester) by
  * the same neighbour-aware noisy-channel score used above, returning ALL
@@ -222,8 +265,8 @@ export function rankCandidates(
  * trusts Harper's frequency-first order and only overrides on a big margin —
  * this assumes the pool has no meaningful prior order (Hunspell's ranking is
  * opaque/weak), so it scores every candidate by context + channel and sorts.
- * `m === null` → frequency-free fallback that prefers the most plausible typo
- * (transposition / smallest edit distance). Pure & synchronous.
+ * Score = context − SPELL_W·typoCost (see typoCost). `m === null` → sort by
+ * typoCost alone (most plausible slip first). Pure & synchronous.
  */
 export function rankSpellCandidates(
   m: NgramModel | null,
@@ -234,8 +277,12 @@ export function rankSpellCandidates(
   cands: string[],
 ): string[] {
   if (cands.length <= 1) return cands.slice();
+  const typo = original.toLowerCase();
   if (!m) {
-    return cands.slice().sort((a, b) => channel(original, b) - channel(original, a));
+    return cands
+      .map((c) => ({ c, d: typoCost(typo, c.toLowerCase()) }))
+      .sort((a, b) => a.d - b.d)
+      .map((x) => x.c);
   }
   const [left, right] = neighbours(text, offset, offset + length);
   const score = (c: string): number => {
@@ -251,7 +298,7 @@ export function rankSpellCandidates(
       parts++;
     }
     if (parts === 0) ctx = uniLn(m, w);
-    return ctx + W_CH * channel(original, c);
+    return ctx - SPELL_W * typoCost(typo, w);
   };
   return cands
     .map((c) => ({ c, s: score(c) }))
