@@ -10,7 +10,7 @@ GitHub Pages, upload the packaged zip + screenshots, paste the fields below, sub
 - **Language:** English (US) - note other locales as future work
 - **Privacy policy URL:** `https://zazzn.github.io/ogramext/privacy.html`
   (live once GitHub Pages is enabled: repo Settings -> Pages -> Source = "GitHub Actions";
-  the `deploy-pages.yml` workflow publishes `privacy.html` on every push to `og-rewrite`.)
+  the `deploy-pages.yml` workflow publishes `privacy.html` on every push to `main`.)
 
 ## Summary (132 char max)
 > Private, local-first grammar, spelling and style checking everywhere you type. Free, open-source, bring your own AI key.
